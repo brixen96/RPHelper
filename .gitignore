@@ -5,5 +5,7 @@ config.json
 handoff/
 
 node_modules/
+dist/
+.rphelper-state.json
 *.log
 .DS_Store

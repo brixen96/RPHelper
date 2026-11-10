@@ -16,19 +16,24 @@ flowchart LR
 
 **No browser needed** — keep the watcher terminal open while playing.
 
-## Quick start
+## Quick start (friends: one-time setup, then forget it)
 
 ```powershell
-# 1. Start the background watcher (keep this terminal open while playing)
-npm start
+# 1. Build the standalone watcher (no Node needed to run it)
+npm run build:exe
 
 # 2. Install the addon into WoW
 npm run install:addon
 
-# 3. In WoW: /rph to open the panel
+# 3. Register the watcher to start with Windows (invisible, minimized)
+npm run install:autostart
+
+# 4. In WoW: /rph to open the panel
 ```
 
-> 💡 Name, race, class, spec & level are captured automatically by the addon (SavedVariables). Personality and speech quirks are edited right in the panel — everything stays in-game.
+After that, friends never type anything: `RPHelper.exe` starts with Windows, the addon GUI does the rest. Dev alternative: `npm start` runs the watcher from source.
+
+> 💡 Name, race, class, spec & level are captured automatically by the addon (SavedVariables). Personality and speech quirks are edited right in the panel — everything stays in-game. A blank status page lives at `http://127.0.0.1:7331` (health only, no GUI).
 
 ### Workflow per scene (no alt-tab)
 
@@ -55,10 +60,11 @@ Copy `config.example.json` → `config.json`:
 
 ```
 RPHelper/
-├── server/server.js     # Background watcher: polls requests, calls AI, writes answers
+├── server/server.js     # Watcher: polls requests, calls AI, writes answers, status page
 ├── server/player.js     # SavedVariables / WTF discovery helpers
 ├── Addon/               # WoW addon (Lua) — the whole GUI lives here
-├── scripts/             # install-addon.ps1, test-player.mjs
+├── public/              # Blank status page (health only, no GUI)
+├── scripts/             # install-addon.ps1, build-exe.mjs, install-autostart.ps1
 ├── config.example.json  # copy to config.json
 └── README.md
 ```

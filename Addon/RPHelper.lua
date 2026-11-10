@@ -142,9 +142,10 @@ local function CreatePanel()
   status:SetText("Ready — describe the scene below.")
   f.statusFs = status
 
-  -- Scene box
+  -- Scene box (labels get 8px clearance above their boxes — the screenshot
+  -- showed them colliding with the status line and the box borders)
   local sceneBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  sceneBox:SetPoint("TOPLEFT", 16, -54)
+  sceneBox:SetPoint("TOPLEFT", 16, -64)
   sceneBox:SetSize(400, 48)
   sceneBox:SetFontObject("GameFontHighlight")
   sceneBox:SetMaxLetters(400)
@@ -152,13 +153,13 @@ local function CreatePanel()
   f.sceneBox = sceneBox
 
   local sceneLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  sceneLabel:SetPoint("BOTTOMLEFT", sceneBox, "TOPLEFT", 2, 4)
+  sceneLabel:SetPoint("BOTTOMLEFT", sceneBox, "TOPLEFT", 2, 8)
   sceneLabel:SetText("Scene / what just happened:")
   f.sceneLabel = sceneLabel
 
   -- Character sheet: personality
   local personalityBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  personalityBox:SetPoint("TOPLEFT", 16, -114)
+  personalityBox:SetPoint("TOPLEFT", 16, -126)
   personalityBox:SetSize(400, 36)
   personalityBox:SetFontObject("GameFontHighlight")
   personalityBox:SetMaxLetters(300)
@@ -166,12 +167,12 @@ local function CreatePanel()
   f.personalityBox = personalityBox
 
   local personalityLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  personalityLabel:SetPoint("BOTTOMLEFT", personalityBox, "TOPLEFT", 2, 4)
+  personalityLabel:SetPoint("BOTTOMLEFT", personalityBox, "TOPLEFT", 2, 8)
   personalityLabel:SetText("Personality:")
 
   -- Character sheet: speech quirks
   local quirksBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  quirksBox:SetPoint("TOPLEFT", 16, -162)
+  quirksBox:SetPoint("TOPLEFT", 16, -176)
   quirksBox:SetSize(400, 36)
   quirksBox:SetFontObject("GameFontHighlight")
   quirksBox:SetMaxLetters(300)
@@ -179,12 +180,12 @@ local function CreatePanel()
   f.quirksBox = quirksBox
 
   local quirksLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  quirksLabel:SetPoint("BOTTOMLEFT", quirksBox, "TOPLEFT", 2, 4)
+  quirksLabel:SetPoint("BOTTOMLEFT", quirksBox, "TOPLEFT", 2, 8)
   quirksLabel:SetText("Speech quirks:")
 
   -- Tone dropdown
   local dropdown = CreateFrame("Frame", "RPHelperToneDropdown", f, "UIDropDownMenuTemplate")
-  dropdown:SetPoint("TOPLEFT", 10, -206)
+  dropdown:SetPoint("TOPLEFT", 10, -226)
   UIDropDownMenu_SetWidth(dropdown, 130)
   UIDropDownMenu_SetText(dropdown, db and db.tone or "Neutral")
   UIDropDownMenu_Initialize(dropdown, function(self, level)
@@ -232,7 +233,7 @@ local function CreatePanel()
 
   -- Suggestions container
   local container = CreateFrame("Frame", nil, f)
-  container:SetPoint("TOPLEFT", 16, -242)
+  container:SetPoint("TOPLEFT", 16, -262)
   container:SetPoint("BOTTOMRIGHT", -16, 40)
   f.rowsContainer = container
 

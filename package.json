@@ -6,7 +6,9 @@
   "private": true,
   "scripts": {
     "start": "node server/server.js",
-    "install:addon": "powershell -ExecutionPolicy Bypass -File scripts/install-addon.ps1"
+    "install:addon": "powershell -ExecutionPolicy Bypass -File scripts/install-addon.ps1",
+    "build:exe": "node scripts/build-exe.mjs",
+    "install:autostart": "powershell -ExecutionPolicy Bypass -File scripts/install-autostart.ps1"
   },
   "engines": {
     "node": ">=18"

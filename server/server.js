@@ -1,19 +1,37 @@
 /**
- * RPHelper companion — background watcher (no web UI, no HTTP server).
+ * RPHelper companion — background watcher + blank local status page.
  * Zero-dependency Node process:
  *  - polls the addon's SavedVariables file for in-game requests (1s)
  *  - calls the AI (OpenRouter) or falls back to offline templates
  *  - writes answers into the addon's RPHelperHandoff.lua
- * The addon auto-reloads and shows the suggestions — everything is in-game.
+ *  - serves a minimal status page on 127.0.0.1:7331 (the GUI itself is in-game)
  */
+import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findSavedVariablesFile, parseSavedVariables, deriveWowRoot } from './player.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+/** Repo root: module dir (dev) → exe dir (packaged) → cwd. */
+function detectRoot() {
+  const candidates = [];
+  try { candidates.push(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')); } catch { /* bundled */ }
+  try { candidates.push(path.dirname(process.execPath)); } catch { /* packaged exe */ }
+  try { candidates.push(path.resolve(path.dirname(process.execPath), '..')); } catch { /* dist/ layout */ }
+  candidates.push(process.cwd());
+  for (const c of candidates) {
+    if (
+      fs.existsSync(path.join(c, 'config.example.json')) ||
+      fs.existsSync(path.join(c, 'config.json'))
+    ) {
+      return c;
+    }
+  }
+  return process.cwd();
+}
+const ROOT = detectRoot();
 const REPO_ADDON_DIR = path.join(ROOT, 'Addon');
+const PUBLIC_DIR = path.join(ROOT, 'public');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -23,13 +41,23 @@ function loadConfig() {
   const examplePath = path.join(ROOT, 'config.example.json');
   const file = fs.existsSync(cfgPath) ? cfgPath : examplePath;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    // Strip UTF-8 BOM — PowerShell-written files carry one and JSON.parse chokes on it
+    return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
   } catch (err) {
     console.error(`[config] failed to read ${file}: ${err.message}`);
     return { port: 7331, handoffPath: '', openrouter: { apiKey: '', model: 'deepseek/deepseek-v4-flash' } };
   }
 }
 const config = loadConfig();
+const PORT = config.port || 7331;
+
+// Watcher stats, exposed on the status page
+const stats = {
+  startedAt: new Date().toISOString(),
+  requestsServed: 0,
+  lastRequestAt: null,
+  lastError: null,
+};
 
 // ---------------------------------------------------------------------------
 // Handoff target resolution
@@ -218,12 +246,92 @@ function generateOffline(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// Minimal status page (blank by design — the GUI lives in-game)
+// ---------------------------------------------------------------------------
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+};
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+}
+
+function serveStatic(req, res) {
+  let urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (urlPath === '/') urlPath = '/index.html';
+  const filePath = path.join(PUBLIC_DIR, urlPath);
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403);
+    return res.end('forbidden');
+  }
+  fs.readFile(filePath, (err, buf) => {
+    if (err) {
+      res.writeHead(404);
+      return res.end('not found');
+    }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream' });
+    res.end(buf);
+  });
+}
+
+const server = http.createServer((req, res) => {
+  try {
+    const { pathname } = new URL(req.url, 'http://x');
+    if (pathname === '/api/status') {
+      const target = resolveHandoffTarget();
+      const wowRoot = deriveWowRoot(config);
+      return sendJson(res, 200, {
+        ok: true,
+        hasApiKey: Boolean(config.openrouter?.apiKey),
+        model: config.openrouter?.model || null,
+        handoffPath: target.file,
+        handoffSource: target.where,
+        svPath: wowRoot ? findSavedVariablesFile(wowRoot) : null,
+        uptimeSec: Math.round(process.uptime()),
+        requestsServed: stats.requestsServed,
+        lastRequestAt: stats.lastRequestAt,
+        lastError: stats.lastError,
+      });
+    }
+    if (req.method === 'GET') return serveStatic(req, res);
+    res.writeHead(404);
+    res.end('not found');
+  } catch (err) {
+    console.error(`[http] ${err.stack || err.message}`);
+    sendJson(res, 500, { ok: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Game request watcher
 // The addon writes a pending request (reqId/reqStatus/...) into its
 // SavedVariables on /reload; we poll that file, generate, and write the
 // answer into the handoff file. The addon auto-reloads once more to show it.
+// lastProcessedId is persisted so a watcher/exe restart never re-fires an
+// already-answered request.
 // ---------------------------------------------------------------------------
-let lastProcessedId = null;
+const STATE_FILE = path.join(ROOT, '.rphelper-state.json');
+function loadState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return {};
+  }
+}
+function saveState(obj) {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(obj), 'utf8');
+  } catch (err) {
+    console.warn(`[state] could not persist: ${err.message}`);
+  }
+}
+let lastProcessedId = loadState().lastProcessedId ?? null;
 let processing = false;
 
 async function processGameRequest() {
@@ -290,22 +398,30 @@ async function processGameRequest() {
       'utf8'
     );
     console.log(`[watcher] wrote ${suggestions.length} suggestions${error ? ` (error: ${error})` : ''} -> ${target.file}`);
+    stats.requestsServed += 1;
+    stats.lastRequestAt = new Date().toISOString();
+    stats.lastError = error || null;
+    saveState({ lastProcessedId: String(reqId) });
   } catch (err) {
     console.error(`[watcher] ${err.stack || err.message}`);
+    stats.lastError = err.message;
   } finally {
     processing = false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Startup — pure background process, no HTTP server
+// Startup
 // ---------------------------------------------------------------------------
 const target = resolveHandoffTarget();
 const wowRoot = deriveWowRoot(config);
-console.log('RPHelper companion running (background watcher, no web UI)');
-console.log(`  API key:  ${config.openrouter?.apiKey ? 'configured' : 'MISSING (offline templates only)'}`);
-console.log(`  Model:    ${config.openrouter?.model || 'deepseek/deepseek-v4-flash'}`);
-console.log(`  Handoff:  ${target.file} (${target.where})`);
-console.log(`  Requests: ${wowRoot ? findSavedVariablesFile(wowRoot) || 'not found yet (log in + /reload)' : 'WoW install not found'}`);
-console.log('  Polling for in-game requests every 1s — keep this window open while playing.');
+server.listen(PORT, '127.0.0.1', () => {
+  console.log('RPHelper companion running');
+  console.log(`  API key:  ${config.openrouter?.apiKey ? 'configured' : 'MISSING (offline templates only)'}`);
+  console.log(`  Model:    ${config.openrouter?.model || 'deepseek/deepseek-v4-flash'}`);
+  console.log(`  Handoff:  ${target.file} (${target.where})`);
+  console.log(`  Requests: ${wowRoot ? findSavedVariablesFile(wowRoot) || 'not found yet (log in + /reload)' : 'WoW install not found'}`);
+  console.log(`  Status:   http://127.0.0.1:${PORT} (blank page, health only)`);
+  console.log('  Polling for in-game requests every 1s.');
+});
 setInterval(() => processGameRequest().catch((e) => console.error(`[watcher] ${e.message}`)), 1000);

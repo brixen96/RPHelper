@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>RPHelper — status</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #14100c;
+      color: #9a8f76;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+    }
+    .box { text-align: center; line-height: 1.8; }
+    h1 { color: #c8a24a; font-weight: normal; letter-spacing: 2px; margin: 0 0 8px; }
+    .ok { color: #6fbf73; }
+    .bad { color: #d05050; }
+    code { background: #2a231a; padding: 1px 6px; border-radius: 4px; color: #c8a24a; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>⚔️ RPHelper</h1>
+    <div id="line1">connecting…</div>
+    <div id="line2"></div>
+    <div id="line3"></div>
+    <p>The GUI lives in-game — type <code>/rph</code> in WoW.</p>
+  </div>
+  <script>
+    async function refresh() {
+      try {
+        const res = await fetch('/api/status');
+        const s = await res.json();
+        document.getElementById('line1').innerHTML =
+          `<span class="${s.ok ? 'ok' : 'bad'}">● watcher running</span> · ${s.model || '?'}`;
+        document.getElementById('line2').textContent =
+          `requests served: ${s.requestsServed}` + (s.lastRequestAt ? ` · last: ${s.lastRequestAt.slice(11, 19)} UTC` : '');
+        document.getElementById('line3').textContent =
+          s.svPath ? 'game link: connected' : 'game link: waiting for first /reload in game';
+      } catch {
+        document.getElementById('line1').innerHTML = '<span class="bad">● watcher not reachable</span>';
+      }
+    }
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>
