@@ -1,0 +1,9 @@
+# Private config (contains API key)
+config.json
+
+# Default handoff output
+handoff/
+
+node_modules/
+*.log
+.DS_Store

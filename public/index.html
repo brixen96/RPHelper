@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RPHelper — WoW RP co-pilot</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>⚔️ RPHelper</h1>
+    <p class="sub">Roleplay response co-pilot for WoW — generate in-character replies, send them to the in-game panel.</p>
+    <div id="statusBar" class="status">checking…</div>
+  </header>
+
+  <main>
+    <!-- Character sheet -->
+    <section class="card">
+      <h2>1 · Your character</h2>
+      <div class="grid">
+        <label>Name <input id="charName" placeholder="e.g. Thalric Dawnbrand" /></label>
+        <label>Race / Class <input id="charRace" placeholder="e.g. Human Paladin" /></label>
+        <label class="wide">Personality <textarea id="charPersonality" rows="2" placeholder="e.g. Earnest, a bit naive, loyal to a fault"></textarea></label>
+        <label class="wide">Speech quirks <textarea id="charQuirks" rows="2" placeholder="e.g. Says 'well met', never swears, calls everyone friend"></textarea></label>
+      </div>
+    </section>
+
+    <!-- Scene -->
+    <section class="card">
+      <h2>2 · The scene</h2>
+      <div class="grid">
+        <label>Setting <input id="sceneSetting" placeholder="e.g. the Golden Keg tavern, Stormwind" value="a tavern" /></label>
+        <label>Talking to <input id="sceneWith" placeholder="e.g. a night elf rogue" value="another player" /></label>
+        <label class="wide">What happened / topic <textarea id="sceneRecent" rows="2" placeholder="e.g. They just sat down and asked why I'm staring at the door"></textarea></label>
+        <label>Tone
+          <select id="tone">
+            <option>Neutral</option>
+            <option>Warm/Friendly</option>
+            <option>Gruff/Tough</option>
+            <option>Witty/Flirty</option>
+            <option>Formal/Noble</option>
+            <option>Mysterious</option>
+          </select>
+        </label>
+        <label>How many
+          <select id="count">
+            <option>3</option><option>2</option><option>4</option><option>5</option>
+          </select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="btnGenerate" class="primary">✨ Generate suggestions</button>
+        <button id="btnSend" disabled>➡️ Send to game</button>
+      </div>
+      <div id="genMeta" class="meta"></div>
+    </section>
+
+    <!-- Suggestions -->
+    <section class="card">
+      <h2>3 · Suggestions <span class="hint">click to copy · edit before sending</span></h2>
+      <div id="suggestions" class="suggestions empty">
+        <p class="placeholder">Nothing yet — fill in the scene and hit Generate.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Companion app runs locally on <code>127.0.0.1</code> · in-game: type <code>/rph</code> after sending + <code>/reload</code>.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+## Interface: 110205
+## Title: RPHelper
+## Notes: Roleplay response co-pilot — pairs with the RPHelper companion app.
+## Author: Emil & friends
+## Version: 0.1.0
+## SavedVariables: RPHelperDB
+
+RPHelperHandoff.lua
+RPHelper.lua

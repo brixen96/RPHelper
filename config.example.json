@@ -1,0 +1,9 @@
+{
+  "port": 7331,
+  "savedVariablesPath": "",
+  "openrouter": {
+    "apiKey": "",
+    "model": "openai/gpt-4o-mini",
+    "baseUrl": "https://openrouter.ai/api/v1"
+  }
+}

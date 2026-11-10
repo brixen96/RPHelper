@@ -1,0 +1,14 @@
+{
+  "name": "rphelper",
+  "version": "0.1.0",
+  "description": "WoW roleplay response co-pilot: local companion app + in-game addon",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server/server.js",
+    "install:addon": "powershell -ExecutionPolicy Bypass -File scripts/install-addon.ps1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
