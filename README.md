@@ -6,13 +6,15 @@ A roleplay response co-pilot for World of Warcraft — for you and your friends 
 
 ```mermaid
 flowchart LR
-    A[Companion app<br/>browser on 127.0.0.1] -->|AI writes suggestions| B[Handoff file<br/>RPHelperHandoff.lua]
-    B -->|/reload| C[In-game panel<br/>/rph]
+    A[In-game panel<br/>/rph] -->|writes request to<br/>SavedVariables + reload| B[Companion app<br/>polls every 1s]
+    B -->|AI writes answer to<br/>RPHelperHandoff.lua| C[Addon auto-reloads<br/>and shows suggestions]
     C -->|click| D[Inserts into chat<br/>you press Enter]
 ```
 
-1. **Companion app** (Node, zero dependencies) — a local web page where you fill in your character sheet and the scene, hit *Generate*, and get 3 in-character reply suggestions. Uses OpenRouter if you add an API key; falls back to offline templates if not.
-2. **WoW addon** (`Addon/`) — a draggable in-game panel that shows the suggestions. Click one to drop it into your chat box; **you** press Enter (nothing is ever sent automatically).
+1. **WoW addon** (`Addon/`) — the whole GUI lives in-game: describe the scene, pick a tone, hit *Write suggestions*. The addon persists a request into its SavedVariables and reloads the UI (WoW writes SavedVariables on reload).
+2. **Companion app** (Node, zero dependencies, runs in background) — polls the SavedVariables file every second, calls the AI (OpenRouter, default `deepseek/deepseek-v4-flash`), writes the answer into `RPHelperHandoff.lua`. The addon auto-reloads once more and shows the suggestions. Click one to drop it into chat; **you** press Enter (nothing is ever sent automatically).
+
+The browser page (`http://127.0.0.1:7331`) is now just a **settings/status page**: model, paths, and the character sheet (personality & speech quirks) that feeds the AI.
 
 ## Quick start
 
@@ -29,12 +31,13 @@ npm run install:addon
 
 > 💡 The character sheet (name, race, class, spec) auto-fills from the game — the addon saves it into its SavedVariables, so type `/reload` once after your first login with the addon. Or click **🎮 Pull from game** anytime. Without the addon data, name + realm are still detected from the WTF folder.
 
-### Workflow per scene
+### Workflow per scene (no alt-tab)
 
-1. Fill in the scene in the browser → **Generate suggestions**
-2. Edit them if you like → **Send to game**
-3. In WoW type `/reload`, then `/rph`
-4. Click a suggestion → it lands in your chat box → press **Enter**
+1. In WoW: `/rph` → describe the scene → pick a tone → **Write suggestions**
+2. The UI reloads twice automatically (request → AI → answer), ~3–5 s total
+3. Click a suggestion → it lands in your chat box → press **Enter**
+
+Slash shortcuts: `/rph set <scene>` (describe + generate in one command), `/rph tone <name>`, `/rph reload`.
 
 ## Configuration
 
@@ -46,7 +49,7 @@ Copy `config.example.json` → `config.json`:
 | `savedVariablesPath` | Leave empty for auto-detect; or set the full path to `RPHelperHandoff.lua` inside your WoW `AddOns\RPHelper` folder |
 | `wowRoot` | Optional: your WoW `_retail_` folder, if auto-detection can't find it (used for character auto-fill) |
 | `openrouter.apiKey` | Your OpenRouter key (https://openrouter.ai) — optional, offline templates work without it |
-| `openrouter.model` | Any chat model, default `openai/gpt-4o-mini` |
+| `openrouter.model` | Any chat model, default `deepseek/deepseek-v4-flash` |
 
 > ⚠️ `config.json` is gitignored — it holds your API key. The server binds to `127.0.0.1` only, so it's never reachable from the network.
 

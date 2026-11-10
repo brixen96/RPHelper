@@ -3,7 +3,7 @@
   "savedVariablesPath": "",
   "openrouter": {
     "apiKey": "",
-    "model": "openai/gpt-4o-mini",
+    "model": "deepseek/deepseek-v4-flash",
     "baseUrl": "https://openrouter.ai/api/v1"
   }
 }
