@@ -164,11 +164,46 @@ function loadLocal() {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-fill from the game (server reads the addon's SavedVariables on disk)
+// ---------------------------------------------------------------------------
+async function pullFromGame(onlyEmpty = false) {
+  const meta = $('playerMeta');
+  meta.textContent = '⏳ checking game data…';
+  try {
+    const res = await fetch('/api/player');
+    const data = await res.json();
+    if (!data.found) {
+      meta.textContent = `⏳ ${data.hint || 'no character data found yet'}`;
+      return null;
+    }
+    const p = data.player || {};
+    const raceClass = [p.race, p.class].filter(Boolean).join(' ');
+    const raceClassFull = p.spec && raceClass ? `${raceClass} (${p.spec})` : raceClass;
+    if (p.name && (!onlyEmpty || !$('charName').value.trim())) $('charName').value = p.name;
+    if (raceClassFull && (!onlyEmpty || !$('charRace').value.trim())) $('charRace').value = raceClassFull;
+    const full = [p.name, p.realm].filter(Boolean).join('-');
+    const lvl = p.level ? ` · lvl ${p.level}` : '';
+    const src =
+      data.source === 'savedvariables'
+        ? 'full data from SavedVariables'
+        : 'name/realm only — /reload in game once for class & race';
+    meta.textContent = `✅ ${full}${lvl} · ${src}`;
+    saveLocal();
+    return p;
+  } catch (err) {
+    meta.textContent = `🔴 ${err.message}`;
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wire up
 // ---------------------------------------------------------------------------
 $('btnGenerate').addEventListener('click', generate);
 $('btnSend').addEventListener('click', sendToGame);
+$('btnPull').addEventListener('click', () => pullFromGame(false));
 FIELDS.forEach((id) => $(id).addEventListener('change', saveLocal));
 
 loadLocal();
 loadStatus();
+pullFromGame(true);

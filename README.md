@@ -27,6 +27,8 @@ npm run install:addon
 # 3. In WoW: /rph to toggle the panel
 ```
 
+> 💡 The character sheet (name, race, class, spec) auto-fills from the game — the addon saves it into its SavedVariables, so type `/reload` once after your first login with the addon. Or click **🎮 Pull from game** anytime. Without the addon data, name + realm are still detected from the WTF folder.
+
 ### Workflow per scene
 
 1. Fill in the scene in the browser → **Generate suggestions**
@@ -42,6 +44,7 @@ Copy `config.example.json` → `config.json`:
 |---|---|
 | `port` | Companion app port (default `7331`) |
 | `savedVariablesPath` | Leave empty for auto-detect; or set the full path to `RPHelperHandoff.lua` inside your WoW `AddOns\RPHelper` folder |
+| `wowRoot` | Optional: your WoW `_retail_` folder, if auto-detection can't find it (used for character auto-fill) |
 | `openrouter.apiKey` | Your OpenRouter key (https://openrouter.ai) — optional, offline templates work without it |
 | `openrouter.model` | Any chat model, default `openai/gpt-4o-mini` |
 

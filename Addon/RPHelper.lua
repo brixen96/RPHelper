@@ -171,6 +171,40 @@ local function LayoutRows(suggestions)
 end
 
 -- ---------------------------------------------------------------------------
+-- Player info capture (for the companion app's auto-fill)
+-- ---------------------------------------------------------------------------
+-- SavedVariables are written by the game on /reload or logout, so the app
+-- sees the data after the player types /reload once.
+local function CapturePlayerInfo()
+  if not db then return end
+  local name = UnitName("player")
+  if not name or name == "" then return end
+  local race, raceToken = UnitRace("player")
+  local class, classToken = UnitClass("player")
+  local sexCode = UnitSex("player")
+  local specName
+  if GetSpecialization then
+    local specIndex = GetSpecialization()
+    if specIndex then
+      local _, sname = GetSpecializationInfo(specIndex)
+      specName = sname
+    end
+  end
+  db.player = {
+    name = name,
+    realm = GetRealmName(),
+    race = race,
+    raceToken = raceToken,
+    class = class,
+    classToken = classToken,
+    level = UnitLevel("player"),
+    spec = specName,
+    sex = sexCode == 3 and "Female" or (sexCode == 2 and "Male" or nil),
+    updatedAt = date("%Y-%m-%d %H:%M"),
+  }
+end
+
+-- ---------------------------------------------------------------------------
 -- Refresh / events
 -- ---------------------------------------------------------------------------
 function ns.Refresh()
@@ -190,6 +224,8 @@ end
 
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
+eventFrame:RegisterEvent("PLAYER_LOGIN")
+eventFrame:RegisterEvent("PLAYER_LEVEL_UP")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -205,6 +241,8 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
       end
     end
     print("|cffffcc00RPHelper|r loaded — type |cffffcc00/rph|r to toggle the panel.")
+  elseif event == "PLAYER_LOGIN" or event == "PLAYER_LEVEL_UP" then
+    CapturePlayerInfo()
   elseif event == "PLAYER_ENTERING_WORLD" then
     -- Show automatically if the companion app already wrote suggestions.
     local handoff = GetHandoff()

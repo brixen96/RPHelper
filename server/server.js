@@ -12,6 +12,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getPlayerInfo } from './player.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -317,6 +318,10 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(target.file, lua, 'utf8');
       console.log(`[handoff] wrote ${payload.suggestions.length} suggestions -> ${target.file}`);
       return sendJson(res, 200, { ok: true, path: target.file, source: target.where });
+    }
+
+    if (pathname === '/api/player' && req.method === 'GET') {
+      return sendJson(res, 200, getPlayerInfo(config));
     }
 
     if (req.method === 'GET') return serveStatic(req, res);
