@@ -104,6 +104,31 @@ local function LayoutRows(suggestions)
 end
 
 -- ---------------------------------------------------------------------------
+-- Character info line (shows captured player data so the user can confirm
+-- the addon is reading their character correctly)
+-- ---------------------------------------------------------------------------
+local function PlayerInfoText()
+  local p = db and db.player
+  if not p or not p.name then
+    return "character: not captured yet - type /reload once in game"
+  end
+  local name = p.realm and (p.name .. "-" .. p.realm) or p.name
+  local out = name
+  local race, class = p.race or "", p.class or ""
+  local rc = (race ~= "" and class ~= "") and (race .. " " .. class) or (race .. class)
+  if rc ~= "" then out = out .. "  |  " .. rc end
+  if p.spec then out = out .. " (" .. tostring(p.spec) .. ")" end
+  if p.level then out = out .. "  |  lvl " .. tostring(p.level) end
+  return out
+end
+
+local function UpdateCharInfo()
+  if panel and panel.charInfoFs then
+    panel.charInfoFs:SetText(PlayerInfoText())
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- Control panel
 -- ---------------------------------------------------------------------------
 local function CreatePanel()
@@ -134,18 +159,26 @@ local function CreatePanel()
   close:SetPoint("TOPRIGHT", -6, -6)
   close:SetScript("OnClick", function() f:Hide() end)
 
-  -- Status line
+  -- Status line (sequentially anchored so wrapping can never collide)
   local status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   status:SetPoint("TOP", title, "BOTTOM", 0, -6)
   status:SetWidth(400)
   status:SetJustifyH("CENTER")
-  status:SetText("Ready — describe the scene below.")
+  status:SetText("Ready - describe the scene below.")
   f.statusFs = status
 
-  -- Scene box (labels get 8px clearance above their boxes — the screenshot
-  -- showed them colliding with the status line and the box borders)
+  -- Character info line (name/realm | race class (spec) | lvl)
+  local charInfo = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  charInfo:SetPoint("TOP", status, "BOTTOM", 0, -4)
+  charInfo:SetWidth(400)
+  charInfo:SetJustifyH("CENTER")
+  charInfo:SetText(PlayerInfoText())
+  f.charInfoFs = charInfo
+
+  -- Scene box: each box sits 24px below the previous element so its label
+  -- (8px above the box) always has clearance, even when status wraps to 2 lines
   local sceneBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  sceneBox:SetPoint("TOPLEFT", 16, -64)
+  sceneBox:SetPoint("TOPLEFT", charInfo, "BOTTOMLEFT", -4, -24)
   sceneBox:SetSize(400, 48)
   sceneBox:SetFontObject("GameFontHighlight")
   sceneBox:SetMaxLetters(400)
@@ -159,7 +192,7 @@ local function CreatePanel()
 
   -- Character sheet: personality
   local personalityBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  personalityBox:SetPoint("TOPLEFT", 16, -126)
+  personalityBox:SetPoint("TOPLEFT", sceneBox, "BOTTOMLEFT", 0, -24)
   personalityBox:SetSize(400, 36)
   personalityBox:SetFontObject("GameFontHighlight")
   personalityBox:SetMaxLetters(300)
@@ -172,7 +205,7 @@ local function CreatePanel()
 
   -- Character sheet: speech quirks
   local quirksBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  quirksBox:SetPoint("TOPLEFT", 16, -176)
+  quirksBox:SetPoint("TOPLEFT", personalityBox, "BOTTOMLEFT", 0, -24)
   quirksBox:SetSize(400, 36)
   quirksBox:SetFontObject("GameFontHighlight")
   quirksBox:SetMaxLetters(300)
@@ -183,9 +216,23 @@ local function CreatePanel()
   quirksLabel:SetPoint("BOTTOMLEFT", quirksBox, "TOPLEFT", 2, 8)
   quirksLabel:SetText("Speech quirks:")
 
+  -- Persist the sheet on every keystroke: SavedVariables are written by the
+  -- game on /reload or logout, so the current db always survives restarts.
+  -- (Keeps the template's own OnTextChanged handler for scroll behavior.)
+  local function hookSheetSave(box, key)
+    local orig = box:GetScript("OnTextChanged")
+    box:SetScript("OnTextChanged", function(self, userInput)
+      if orig then orig(self, userInput) end
+      if db then db[key] = self:GetText() end
+    end)
+  end
+  hookSheetSave(sceneBox, "sceneDraft")
+  hookSheetSave(personalityBox, "personality")
+  hookSheetSave(quirksBox, "quirks")
+
   -- Tone dropdown
   local dropdown = CreateFrame("Frame", "RPHelperToneDropdown", f, "UIDropDownMenuTemplate")
-  dropdown:SetPoint("TOPLEFT", 10, -226)
+  dropdown:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", -6, -14)
   UIDropDownMenu_SetWidth(dropdown, 130)
   UIDropDownMenu_SetText(dropdown, db and db.tone or "Neutral")
   UIDropDownMenu_Initialize(dropdown, function(self, level)
@@ -233,7 +280,7 @@ local function CreatePanel()
 
   -- Suggestions container
   local container = CreateFrame("Frame", nil, f)
-  container:SetPoint("TOPLEFT", 16, -262)
+  container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -56)
   container:SetPoint("BOTTOMRIGHT", -16, 40)
   f.rowsContainer = container
 
@@ -285,6 +332,7 @@ local function CapturePlayerInfo()
     sex = sexCode == 3 and "Female" or (sexCode == 2 and "Male" or nil),
     updatedAt = date("%Y-%m-%d %H:%M"),
   }
+  UpdateCharInfo()
 end
 
 -- ---------------------------------------------------------------------------
@@ -375,6 +423,7 @@ end
 -- ---------------------------------------------------------------------------
 function ns.Refresh()
   if not panel then CreatePanel() end
+  UpdateCharInfo()
   local handoff = GetHandoff()
   if handoff and handoff.error then
     panel.statusFs:SetText(("AI error: %s — try again or check the companion app."):format(handoff.error))
