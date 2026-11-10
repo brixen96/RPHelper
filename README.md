@@ -6,30 +6,29 @@ A roleplay response co-pilot for World of Warcraft — for you and your friends 
 
 ```mermaid
 flowchart LR
-    A[In-game panel<br/>/rph] -->|writes request to<br/>SavedVariables + reload| B[Companion app<br/>polls every 1s]
+    A[In-game panel<br/>/rph — everything] -->|writes request to<br/>SavedVariables + reload| B[Background watcher<br/>node server/server.js]
     B -->|AI writes answer to<br/>RPHelperHandoff.lua| C[Addon auto-reloads<br/>and shows suggestions]
     C -->|click| D[Inserts into chat<br/>you press Enter]
 ```
 
-1. **WoW addon** (`Addon/`) — the whole GUI lives in-game: describe the scene, pick a tone, hit *Write suggestions*. The addon persists a request into its SavedVariables and reloads the UI (WoW writes SavedVariables on reload).
-2. **Companion app** (Node, zero dependencies, runs in background) — polls the SavedVariables file every second, calls the AI (OpenRouter, default `deepseek/deepseek-v4-flash`), writes the answer into `RPHelperHandoff.lua`. The addon auto-reloads once more and shows the suggestions. Click one to drop it into chat; **you** press Enter (nothing is ever sent automatically).
+1. **WoW addon** (`Addon/`) — the entire GUI: character sheet (personality & speech quirks), scene description, tone, count, suggestions. Describe the scene, hit *Write suggestions*. The addon persists a request into its SavedVariables and reloads the UI (WoW writes SavedVariables on reload).
+2. **Background watcher** (Node, zero dependencies, no web UI) — polls the SavedVariables file every second, calls the AI (OpenRouter, default `deepseek/deepseek-v4-flash`), writes the answer into `RPHelperHandoff.lua`. The addon auto-reloads once more and shows the suggestions. Click one to drop it into chat; **you** press Enter (nothing is ever sent automatically).
 
-The browser page (`http://127.0.0.1:7331`) is now just a **settings/status page**: model, paths, and the character sheet (personality & speech quirks) that feeds the AI.
+**No browser needed** — keep the watcher terminal open while playing.
 
 ## Quick start
 
 ```powershell
-# 1. Start the companion app
+# 1. Start the background watcher (keep this terminal open while playing)
 npm start
-# → opens http://127.0.0.1:7331
 
 # 2. Install the addon into WoW
 npm run install:addon
 
-# 3. In WoW: /rph to toggle the panel
+# 3. In WoW: /rph to open the panel
 ```
 
-> 💡 The character sheet (name, race, class, spec) auto-fills from the game — the addon saves it into its SavedVariables, so type `/reload` once after your first login with the addon. Or click **🎮 Pull from game** anytime. Without the addon data, name + realm are still detected from the WTF folder.
+> 💡 Name, race, class, spec & level are captured automatically by the addon (SavedVariables). Personality and speech quirks are edited right in the panel — everything stays in-game.
 
 ### Workflow per scene (no alt-tab)
 
@@ -45,22 +44,21 @@ Copy `config.example.json` → `config.json`:
 
 | Key | Meaning |
 |---|---|
-| `port` | Companion app port (default `7331`) |
 | `savedVariablesPath` | Leave empty for auto-detect; or set the full path to `RPHelperHandoff.lua` inside your WoW `AddOns\RPHelper` folder |
-| `wowRoot` | Optional: your WoW `_retail_` folder, if auto-detection can't find it (used for character auto-fill) |
+| `wowRoot` | Optional: your WoW client folder (`_forever_`), if auto-detection can't find it |
 | `openrouter.apiKey` | Your OpenRouter key (https://openrouter.ai) — optional, offline templates work without it |
 | `openrouter.model` | Any chat model, default `deepseek/deepseek-v4-flash` |
 
-> ⚠️ `config.json` is gitignored — it holds your API key. The server binds to `127.0.0.1` only, so it's never reachable from the network.
+> ⚠️ `config.json` is gitignored — it holds your API key. The watcher opens no ports and makes no network connections except to OpenRouter.
 
 ## Project layout
 
 ```
 RPHelper/
-├── server/server.js     # Zero-dep Node server: AI + handoff writer + static host
-├── public/              # Companion web UI (vanilla HTML/CSS/JS)
-├── Addon/               # WoW addon (Lua) — install to Interface\AddOns
-├── scripts/             # install-addon.ps1
+├── server/server.js     # Background watcher: polls requests, calls AI, writes answers
+├── server/player.js     # SavedVariables / WTF discovery helpers
+├── Addon/               # WoW addon (Lua) — the whole GUI lives here
+├── scripts/             # install-addon.ps1, test-player.mjs
 ├── config.example.json  # copy to config.json
 └── README.md
 ```

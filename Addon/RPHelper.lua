@@ -110,7 +110,7 @@ local function CreatePanel()
   if panel then return panel end
 
   local f = CreateFrame("Frame", "RPHelperPanel", UIParent, "BackdropTemplate")
-  f:SetSize(440, 430)
+  f:SetSize(440, 560)
   f:SetPoint("CENTER", UIParent, "CENTER", 380, 0)
   f:SetMovable(true)
   f:EnableMouse(true)
@@ -144,8 +144,8 @@ local function CreatePanel()
 
   -- Scene box
   local sceneBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  sceneBox:SetPoint("TOPLEFT", 16, -64)
-  sceneBox:SetSize(400, 54)
+  sceneBox:SetPoint("TOPLEFT", 16, -54)
+  sceneBox:SetSize(400, 48)
   sceneBox:SetFontObject("GameFontHighlight")
   sceneBox:SetMaxLetters(400)
   sceneBox:SetText(db and db.sceneDraft or "")
@@ -156,9 +156,35 @@ local function CreatePanel()
   sceneLabel:SetText("Scene / what just happened:")
   f.sceneLabel = sceneLabel
 
+  -- Character sheet: personality
+  local personalityBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  personalityBox:SetPoint("TOPLEFT", 16, -114)
+  personalityBox:SetSize(400, 36)
+  personalityBox:SetFontObject("GameFontHighlight")
+  personalityBox:SetMaxLetters(300)
+  personalityBox:SetText(db and db.personality or "")
+  f.personalityBox = personalityBox
+
+  local personalityLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  personalityLabel:SetPoint("BOTTOMLEFT", personalityBox, "TOPLEFT", 2, 4)
+  personalityLabel:SetText("Personality:")
+
+  -- Character sheet: speech quirks
+  local quirksBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  quirksBox:SetPoint("TOPLEFT", 16, -162)
+  quirksBox:SetSize(400, 36)
+  quirksBox:SetFontObject("GameFontHighlight")
+  quirksBox:SetMaxLetters(300)
+  quirksBox:SetText(db and db.quirks or "")
+  f.quirksBox = quirksBox
+
+  local quirksLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  quirksLabel:SetPoint("BOTTOMLEFT", quirksBox, "TOPLEFT", 2, 4)
+  quirksLabel:SetText("Speech quirks:")
+
   -- Tone dropdown
   local dropdown = CreateFrame("Frame", "RPHelperToneDropdown", f, "UIDropDownMenuTemplate")
-  dropdown:SetPoint("TOPLEFT", 10, -136)
+  dropdown:SetPoint("TOPLEFT", 10, -206)
   UIDropDownMenu_SetWidth(dropdown, 130)
   UIDropDownMenu_SetText(dropdown, db and db.tone or "Neutral")
   UIDropDownMenu_Initialize(dropdown, function(self, level)
@@ -206,14 +232,22 @@ local function CreatePanel()
 
   -- Suggestions container
   local container = CreateFrame("Frame", nil, f)
-  container:SetPoint("TOPLEFT", 16, -172)
+  container:SetPoint("TOPLEFT", 16, -242)
   container:SetPoint("BOTTOMRIGHT", -16, 40)
   f.rowsContainer = container
 
   -- Footer hint
   local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   hint:SetPoint("BOTTOMLEFT", 16, 14)
-  hint:SetText("/rph toggle · /rph set <scene> · /rph tone <name>")
+  hint:SetText("/rph toggle · /rph set <scene> · /rph tone <name> · /rph help")
+
+  -- Persist the sheet whenever the panel closes (SavedVariables save on reload/logout)
+  f:SetScript("OnHide", function(self)
+    if not db then return end
+    db.sceneDraft = self.sceneBox:GetText()
+    db.personality = self.personalityBox:GetText()
+    db.quirks = self.quirksBox:GetText()
+  end)
 
   f:Hide()
   panel = f
@@ -272,6 +306,8 @@ function ns.RequestSuggestions()
     return
   end
   db.sceneDraft = scene
+  db.personality = strtrim(panel.personalityBox:GetText() or "")
+  db.quirks = strtrim(panel.quirksBox:GetText() or "")
   db.reqId = RequestId()
   db.reqStatus = "pending"
   db.reqAttempts = 0
@@ -279,8 +315,8 @@ function ns.RequestSuggestions()
   db.reqScene = scene
   db.reqTone = db.tone or "Neutral"
   db.reqCount = db.count or 3
-  db.reqPersonality = db.personality or ""
-  db.reqQuirks = db.quirks or ""
+  db.reqPersonality = db.personality
+  db.reqQuirks = db.quirks
   if panel and panel.statusFs then
     panel.statusFs:SetText("Sending request… reloading UI, suggestions arrive in a moment.")
   end

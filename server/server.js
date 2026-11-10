@@ -1,22 +1,18 @@
 /**
- * RPHelper companion server.
- * Zero-dependency Node HTTP server:
- *  - serves the companion web UI
- *  - /api/generate  -> AI suggestions (OpenRouter) or offline templates
- *  - /api/handoff   -> writes suggestions into the WoW addon's handoff Lua file
- *  - /api/status    -> config / handoff path info
- *
- * Binds to 127.0.0.1 only — it holds your API key.
+ * RPHelper companion — background watcher (no web UI, no HTTP server).
+ * Zero-dependency Node process:
+ *  - polls the addon's SavedVariables file for in-game requests (1s)
+ *  - calls the AI (OpenRouter) or falls back to offline templates
+ *  - writes answers into the addon's RPHelperHandoff.lua
+ * The addon auto-reloads and shows the suggestions — everything is in-game.
  */
-import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getPlayerInfo, findSavedVariablesFile, parseSavedVariables, deriveWowRoot } from './player.js';
+import { findSavedVariablesFile, parseSavedVariables, deriveWowRoot } from './player.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const PUBLIC_DIR = path.join(ROOT, 'public');
 const REPO_ADDON_DIR = path.join(ROOT, 'Addon');
 
 // ---------------------------------------------------------------------------
@@ -34,7 +30,6 @@ function loadConfig() {
   }
 }
 const config = loadConfig();
-const PORT = config.port || 7331;
 
 // ---------------------------------------------------------------------------
 // Handoff target resolution
@@ -223,123 +218,6 @@ function generateOffline(payload) {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------------------------
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-};
-
-function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(body);
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk) => {
-      data += chunk;
-      if (data.length > 1_000_000) {
-        reject(new Error('body too large'));
-        req.destroy();
-      }
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
-
-function serveStatic(req, res) {
-  let urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  if (urlPath === '/') urlPath = '/index.html';
-  const filePath = path.join(PUBLIC_DIR, urlPath);
-  if (!filePath.startsWith(PUBLIC_DIR)) {
-    res.writeHead(403);
-    return res.end('forbidden');
-  }
-  fs.readFile(filePath, (err, buf) => {
-    if (err) {
-      res.writeHead(404);
-      return res.end('not found');
-    }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream' });
-    res.end(buf);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Routes
-// ---------------------------------------------------------------------------
-const server = http.createServer(async (req, res) => {
-  try {
-    const { pathname } = new URL(req.url, 'http://x');
-
-    if (pathname === '/api/status' && req.method === 'GET') {
-      const target = resolveHandoffTarget();
-      const wowRoot = deriveWowRoot(config);
-      return sendJson(res, 200, {
-        hasApiKey: Boolean(config.openrouter?.apiKey),
-        model: config.openrouter?.model || null,
-        handoffPath: target.file,
-        handoffSource: target.where,
-        handoffExists: fs.existsSync(path.dirname(target.file)),
-        svPath: wowRoot ? findSavedVariablesFile(wowRoot) : null,
-      });
-    }
-
-    if (pathname === '/api/generate' && req.method === 'POST') {
-      const payload = JSON.parse((await readBody(req)) || '{}');
-      let suggestions;
-      let source;
-      try {
-        suggestions = await generateWithAI(payload);
-        source = 'openrouter';
-      } catch (err) {
-        console.warn(`[generate] AI failed, using offline templates: ${err.message}`);
-        suggestions = null;
-      }
-      if (!suggestions) {
-        suggestions = generateOffline(payload);
-        source = 'offline';
-      }
-      const count = Math.max(1, Math.min(Number(payload.count) || 3, 6));
-      return sendJson(res, 200, { suggestions: suggestions.slice(0, count), source });
-    }
-
-    if (pathname === '/api/handoff' && req.method === 'POST') {
-      const payload = JSON.parse((await readBody(req)) || '{}');
-      if (!Array.isArray(payload.suggestions) || payload.suggestions.length === 0) {
-        return sendJson(res, 400, { ok: false, error: 'no suggestions' });
-      }
-      const target = resolveHandoffTarget();
-      const lua = buildHandoffFile(payload);
-      fs.mkdirSync(path.dirname(target.file), { recursive: true });
-      fs.writeFileSync(target.file, lua, 'utf8');
-      console.log(`[handoff] wrote ${payload.suggestions.length} suggestions -> ${target.file}`);
-      return sendJson(res, 200, { ok: true, path: target.file, source: target.where });
-    }
-
-    if (pathname === '/api/player' && req.method === 'GET') {
-      return sendJson(res, 200, getPlayerInfo(config));
-    }
-
-    if (req.method === 'GET') return serveStatic(req, res);
-    res.writeHead(404);
-    res.end('not found');
-  } catch (err) {
-    console.error(`[error] ${err.stack || err.message}`);
-    sendJson(res, 500, { ok: false, error: err.message });
-  }
-});
-
-// ---------------------------------------------------------------------------
 // Game request watcher
 // The addon writes a pending request (reqId/reqStatus/...) into its
 // SavedVariables on /reload; we poll that file, generate, and write the
@@ -419,12 +297,15 @@ async function processGameRequest() {
   }
 }
 
-server.listen(PORT, '127.0.0.1', () => {
-  const target = resolveHandoffTarget();
-  console.log(`RPHelper companion running at http://127.0.0.1:${PORT}`);
-  console.log(`  API key:  ${config.openrouter?.apiKey ? 'configured' : 'MISSING (offline templates only)'}`);
-  console.log(`  Model:    ${config.openrouter?.model || 'deepseek/deepseek-v4-flash'}`);
-  console.log(`  Handoff:  ${target.file} (${target.where})`);
-  console.log(`  Watcher:  polling game requests every 1s`);
-  setInterval(() => processGameRequest().catch((e) => console.error(`[watcher] ${e.message}`)), 1000);
-});
+// ---------------------------------------------------------------------------
+// Startup — pure background process, no HTTP server
+// ---------------------------------------------------------------------------
+const target = resolveHandoffTarget();
+const wowRoot = deriveWowRoot(config);
+console.log('RPHelper companion running (background watcher, no web UI)');
+console.log(`  API key:  ${config.openrouter?.apiKey ? 'configured' : 'MISSING (offline templates only)'}`);
+console.log(`  Model:    ${config.openrouter?.model || 'deepseek/deepseek-v4-flash'}`);
+console.log(`  Handoff:  ${target.file} (${target.where})`);
+console.log(`  Requests: ${wowRoot ? findSavedVariablesFile(wowRoot) || 'not found yet (log in + /reload)' : 'WoW install not found'}`);
+console.log('  Polling for in-game requests every 1s — keep this window open while playing.');
+setInterval(() => processGameRequest().catch((e) => console.error(`[watcher] ${e.message}`)), 1000);

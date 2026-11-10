@@ -1,7 +1,7 @@
 {
   "name": "rphelper",
   "version": "0.1.0",
-  "description": "WoW roleplay response co-pilot: local companion app + in-game addon",
+  "description": "WoW roleplay response co-pilot: background AI watcher + fully in-game addon GUI",
   "type": "module",
   "private": true,
   "scripts": {
