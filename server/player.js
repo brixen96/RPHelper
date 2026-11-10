@@ -8,6 +8,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const WOW_ROOT_CANDIDATES = [
+  'C:\\Program Files (x86)\\World of Warcraft\\_forever_',
+  'C:\\Program Files\\World of Warcraft\\_forever_',
+  'D:\\World of Warcraft\\_forever_',
+  'E:\\World of Warcraft\\_forever_',
   'C:\\Program Files (x86)\\World of Warcraft\\_retail_',
   'C:\\Program Files\\World of Warcraft\\_retail_',
   'C:\\Program Files (x86)\\Steam\\steamapps\\common\\World of Warcraft\\_retail_',
@@ -91,7 +95,11 @@ export function discoverCharacters(wowRoot) {
         } catch {
           /* ignore */
         }
-        out.push({ name: char, realm, path: charDir, mtime });
+        // Character folders are either "Name" or "Name-Realm" (WoW names never contain '-')
+        const dash = char.indexOf('-');
+        const name = dash > 0 ? char.slice(0, dash) : char;
+        const realmName = dash > 0 ? char.slice(dash + 1) : realm;
+        out.push({ name, realm: realmName, path: charDir, mtime });
       }
     }
   }

@@ -40,6 +40,8 @@ const PORT = config.port || 7331;
 // Handoff target resolution
 // ---------------------------------------------------------------------------
 const WOW_ADDON_DIR_CANDIDATES = [
+  'C:\\Program Files (x86)\\World of Warcraft\\_forever_\\Interface\\AddOns\\RPHelper',
+  'C:\\Program Files\\World of Warcraft\\_forever_\\Interface\\AddOns\\RPHelper',
   'C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Interface\\AddOns\\RPHelper',
   'C:\\Program Files\\World of Warcraft\\_retail_\\Interface\\AddOns\\RPHelper',
   'C:\\Program Files (x86)\\Steam\\steamapps\\common\\World of Warcraft\\_retail_\\Interface\\AddOns\\RPHelper',

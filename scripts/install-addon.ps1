@@ -5,9 +5,13 @@ $addonName = "RPHelper"
 $repoAddon = Join-Path $PSScriptRoot "..\Addon"
 
 $candidates = @(
-  "${env:ProgramFiles(x86)}\World of Warcraft\_retail_\Interface\AddOns",
+  "${env:ProgramFiles(x86)}\World of Warcraft\_forever_\Interface\AddOns",
+  "$env:ProgramFiles\World of Warcraft\_forever_\Interface\AddOns",
+  "C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns",
   "$env:ProgramFiles\World of Warcraft\_retail_\Interface\AddOns",
   "C:\Program Files (x86)\Steam\steamapps\common\World of Warcraft\_retail_\Interface\AddOns",
+  "D:\World of Warcraft\_forever_\Interface\AddOns",
+  "E:\World of Warcraft\_forever_\Interface\AddOns",
   "D:\World of Warcraft\_retail_\Interface\AddOns",
   "E:\World of Warcraft\_retail_\Interface\AddOns",
   "F:\World of Warcraft\_retail_\Interface\AddOns",
