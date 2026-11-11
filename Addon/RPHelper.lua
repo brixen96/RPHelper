@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.4"
+local VERSION = "0.2.5"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -379,13 +379,30 @@ local function CreatePanel()
   charInfo:SetText(PlayerInfoText())
   f.charInfoFs = charInfo
 
+  -- Plain EditBox with backdrop: InputScrollFrameTemplate throws Lua errors
+  -- on this client (InputBoxTemplates.lua:102 error storms in General.log).
+  local function MakeInputBox(parent, w, h, multiline, maxLetters)
+    local box = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
+    box:SetSize(w, h)
+    box:SetBackdrop({
+      bgFile = "Interface\\Buttons\\WHITE8X8",
+      edgeFile = "Interface\\Buttons\\WHITE8X8",
+      edgeSize = 1,
+    })
+    box:SetBackdropColor(0, 0, 0, 0.6)
+    box:SetBackdropBorderColor(0.35, 0.28, 0.16, 1)
+    box:SetFontObject("GameFontHighlight")
+    box:SetTextInsets(6, 6, 4, 4)
+    box:SetMaxLetters(maxLetters or 400)
+    if multiline then box:SetMultiLine(true) end
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    return box
+  end
+
   -- Scene box: each box sits 24px below the previous element so its label
   -- (8px above the box) always has clearance, even when status wraps to 2 lines
-  local sceneBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  local sceneBox = MakeInputBox(f, 400, 48, true, 400)
   sceneBox:SetPoint("TOPLEFT", charInfo, "BOTTOMLEFT", -4, -24)
-  sceneBox:SetSize(400, 48)
-  sceneBox:SetFontObject("GameFontHighlight")
-  sceneBox:SetMaxLetters(400)
   sceneBox:SetText(db and db.sceneDraft or "")
   f.sceneBox = sceneBox
 
@@ -395,11 +412,8 @@ local function CreatePanel()
   f.sceneLabel = sceneLabel
 
   -- Character sheet: personality
-  local personalityBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  local personalityBox = MakeInputBox(f, 400, 36, true, 300)
   personalityBox:SetPoint("TOPLEFT", sceneBox, "BOTTOMLEFT", 0, -24)
-  personalityBox:SetSize(400, 36)
-  personalityBox:SetFontObject("GameFontHighlight")
-  personalityBox:SetMaxLetters(300)
   personalityBox:SetText(db and db.personality or "")
   f.personalityBox = personalityBox
 
@@ -408,11 +422,8 @@ local function CreatePanel()
   personalityLabel:SetText("Personality:")
 
   -- Character sheet: speech quirks
-  local quirksBox = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  local quirksBox = MakeInputBox(f, 400, 36, true, 300)
   quirksBox:SetPoint("TOPLEFT", personalityBox, "BOTTOMLEFT", 0, -24)
-  quirksBox:SetSize(400, 36)
-  quirksBox:SetFontObject("GameFontHighlight")
-  quirksBox:SetMaxLetters(300)
   quirksBox:SetText(db and db.quirks or "")
   f.quirksBox = quirksBox
 
@@ -426,7 +437,8 @@ local function CreatePanel()
   local function hookSheetSave(box, key)
     local orig = box:GetScript("OnTextChanged")
     box:SetScript("OnTextChanged", function(self, userInput)
-      if orig then orig(self, userInput) end
+      -- pcall: a template handler error must never abort the save
+      if orig then pcall(orig, self, userInput) end
       if db then db[key] = self:GetText() end
     end)
   end
@@ -526,13 +538,9 @@ local function CreatePanel()
   f.chatHistoryBox = chatHistoryBox
   f.chatScroll = chatScroll
 
-  local chatInput = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  local chatInput = MakeInputBox(f, 400, 40, false, 600)
   chatInput:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 46)
   chatInput:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36, 46)
-  chatInput:SetHeight(40)
-  chatInput:SetFontObject("GameFontHighlight")
-  chatInput:SetMaxLetters(600)
-  chatInput:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
   chatInput:SetScript("OnEnterPressed", function(self)
     self:ClearFocus()
     ns.SendChat()
