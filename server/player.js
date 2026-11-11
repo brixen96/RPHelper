@@ -114,6 +114,28 @@ export function discoverCharacters(wowRoot) {
 }
 
 /**
+ * Single-pass Lua string unescape — ordered sequential replaces corrupt
+ * sequences like \\n (escaped backslash + n) inside JSON values.
+ * Exported so the diagnostic exporter can decode event strings too.
+ */
+export function unescapeLuaString(s) {
+  return String(s).replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, g) => {
+    switch (g[0]) {
+      case 'n': return '\n';
+      case 't': return '\t';
+      case 'r': return '\r';
+      case 'a': return '\x07';
+      case 'b': return '\b';
+      case 'f': return '\f';
+      case 'v': return '\v';
+      case '0': return '\0';
+      case 'u': return String.fromCharCode(parseInt(g.slice(1), 16) || 0);
+      default: return g; // quotes, backslash, everything else
+    }
+  });
+}
+
+/**
  * Tolerant flattening parser for the simple key=value Lua tables the addon
  * writes. Collects string and number values keyed by name; table values are
  * skipped (their inner keys flatten into the same dict, which is fine since
@@ -126,22 +148,7 @@ export function parseSavedVariables(text) {
   while ((m = re.exec(text))) {
     const key = m[1];
     if (m[2] !== undefined) {
-      // Single-pass Lua unescape — ordered sequential replaces corrupt
-      // sequences like \\n (escaped backslash + n) inside JSON values
-      out[key] = m[2].replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, g) => {
-        switch (g[0]) {
-          case 'n': return '\n';
-          case 't': return '\t';
-          case 'r': return '\r';
-          case 'a': return '\x07';
-          case 'b': return '\b';
-          case 'f': return '\f';
-          case 'v': return '\v';
-          case '0': return '\0';
-          case 'u': return String.fromCharCode(parseInt(g.slice(1), 16) || 0);
-          default: return g; // quotes, backslash, everything else
-        }
-      });
+      out[key] = unescapeLuaString(m[2]);
     } else if (m[3] !== undefined && out[key] === undefined) {
       out[key] = Number(m[3]);
     }

@@ -10,7 +10,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findSavedVariablesFile, parseSavedVariables, deriveWowRoot } from './player.js';
+import { findSavedVariablesFile, parseSavedVariables, deriveWowRoot, unescapeLuaString } from './player.js';
 
 /** Repo root: module dir (dev) → exe dir (packaged) → cwd. */
 function detectRoot() {
@@ -61,6 +61,13 @@ function logCrash(kind, err) {
 }
 process.on('uncaughtException', (err) => logCrash('uncaughtException', err));
 process.on('unhandledRejection', (err) => logCrash('unhandledRejection', err));
+
+// Every watcher event goes to watcher.log too — the player sends us ONE file.
+function logLine(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch { /* best effort */ }
+  console.log(line);
+}
 
 // Watcher stats, exposed on the status page
 const stats = {
@@ -376,6 +383,13 @@ function serveStatic(req, res) {
 const server = http.createServer((req, res) => {
   try {
     const { pathname } = new URL(req.url, 'http://x');
+    if (pathname === '/api/log') {
+      return sendJson(res, 200, {
+        ok: true,
+        text: buildDiagnosticText(),
+        file: path.join(ROOT, 'RPHelperLog.txt'),
+      });
+    }
     if (pathname === '/api/status') {
       const target = resolveHandoffTarget();
       const wowRoot = deriveWowRoot(config);
@@ -466,7 +480,7 @@ async function processGameRequest() {
     const isDraft = parsed.reqKind === 'draft';
     const isChat = parsed.reqKind === 'chat';
     const kindLabel = isChat ? 'chat' : isDraft ? 'sheet draft' : payload.tone;
-    console.log(`[watcher] game request ${reqId} (${kindLabel}) — generating…`);
+    logLine(`game request ${reqId} (${kindLabel}) - generating...`);
     let suggestions = null;
     let draft = null;
     let chatReply = null;
@@ -482,7 +496,7 @@ async function processGameRequest() {
         }
       } catch (err) {
         error = err.message;
-        console.warn(`[watcher] AI failed: ${err.message}`);
+        logLine(`AI FAILED: ${err.message}`);
       }
     }
     if (!chatReply && !draft && !suggestions && !error) {
@@ -516,22 +530,102 @@ async function processGameRequest() {
       }),
       'utf8'
     );
-    console.log(
+    logLine(
       isChat
-        ? `[watcher] wrote chat reply${error ? ` (error: ${error})` : ''} -> ${target.file}`
+        ? `wrote chat reply${error ? ` (error: ${error})` : ''} -> ${target.file}`
         : isDraft
-          ? `[watcher] wrote sheet draft${error ? ` (error: ${error})` : ''} -> ${target.file}`
-          : `[watcher] wrote ${suggestions.length} suggestions${error ? ` (error: ${error})` : ''} -> ${target.file}`
+          ? `wrote sheet draft${error ? ` (error: ${error})` : ''} -> ${target.file}`
+          : `wrote ${suggestions.length} suggestions${error ? ` (error: ${error})` : ''} -> ${target.file}`
     );
     stats.requestsServed += 1;
     stats.lastRequestAt = new Date().toISOString();
     stats.lastError = error || null;
     saveState({ lastProcessedId: String(reqId) });
   } catch (err) {
-    console.error(`[watcher] ${err.stack || err.message}`);
+    logLine(`ERROR ${err.stack || err.message}`);
     stats.lastError = err.message;
   } finally {
     processing = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic export — the WATCHER writes the log file (the addon itself
+// cannot: io.open is sandboxed and CopyToClipboard is a protected API).
+// Composed from the addon's SavedVariables events + handoff + watcher stats.
+// ---------------------------------------------------------------------------
+let lastExportedLog = '';
+let lastExportErr = null;
+
+function extractAddonEvents(raw) {
+  const block = raw.match(/\["events"\]\s*=\s*\{([\s\S]*?)\}/);
+  if (!block) return [];
+  const out = [];
+  const re = /"((?:[^"\\]|\\.)*)"/g;
+  let m;
+  while ((m = re.exec(block[1]))) out.push(unescapeLuaString(m[1]));
+  return out;
+}
+
+function buildDiagnosticText() {
+  const wowRoot = deriveWowRoot(config);
+  const sv = wowRoot ? findSavedVariablesFile(wowRoot) : null;
+  const lines = [];
+  lines.push(`RPHelper diagnostic export (watcher) ${new Date().toISOString()}`);
+  lines.push(`model: ${config.openrouter?.model || '?'}  apiKey: ${config.openrouter?.apiKey ? 'configured' : 'MISSING'}`);
+  lines.push(`uptime: ${Math.round(process.uptime())}s  served: ${stats.requestsServed}  last: ${stats.lastRequestAt || '-'}  lastError: ${stats.lastError || '-'}`);
+  lines.push(`sv file: ${sv || 'NOT FOUND'}`);
+  if (!sv) return lines.join('\n');
+
+  let raw = '';
+  let parsed = {};
+  try {
+    raw = fs.readFileSync(sv, 'utf8');
+    parsed = parseSavedVariables(raw);
+  } catch (err) {
+    lines.push(`sv read error: ${err.message}`);
+    return lines.join('\n');
+  }
+
+  let h = {};
+  try {
+    h = parseSavedVariables(fs.readFileSync(resolveHandoffTarget().file, 'utf8'));
+  } catch { /* handoff missing/empty */ }
+
+  lines.push('');
+  lines.push('-- request state (from addon SavedVariables) --');
+  lines.push(`reqStatus=${parsed.reqStatus} reqKind=${parsed.reqKind} reqId=${parsed.reqId} attempts=${parsed.reqAttempts}`);
+  lines.push(`chatPendingText=${parsed.chatPendingText || '-'}`);
+  lines.push(`tone=${parsed.tone} count=${parsed.reqCount} scene=${parsed.reqScene || '-'}`);
+  lines.push('');
+  lines.push('-- handoff file (watcher answers) --');
+  lines.push(`kind=${h.kind || '-'} requestId=${h.requestId || '-'} generatedAt=${h.generatedAt || '-'} error=${h.error || '-'} suggestions=${h.suggestions ? 'present' : 'none'}`);
+  lines.push('');
+  lines.push('-- player --');
+  lines.push(`${parsed.name || '?'}-${parsed.realm || '?'} ${parsed.race || ''} ${parsed.class || ''} lvl ${parsed.level || '?'}`);
+  lines.push('');
+  lines.push('-- addon events (newest first) --');
+  // eventsText is a plain string field the addon mirrors on every event —
+  // the parser flattens tables, so this is the reliable path.
+  const eventsText = String(parsed.eventsText || '').trim();
+  const events = eventsText ? eventsText.split('\n') : extractAddonEvents(raw);
+  if (events.length) lines.push(...events);
+  else lines.push('(no events recorded)');
+  return lines.join('\n');
+}
+
+function exportAddonLog() {
+  try {
+    const text = buildDiagnosticText();
+    if (text === lastExportedLog) return;
+    lastExportedLog = text;
+    lastExportErr = null;
+    fs.writeFileSync(path.join(ROOT, 'RPHelperLog.txt'), text, 'utf8');
+  } catch (err) {
+    if (err.message !== lastExportErr) {
+      lastExportErr = err.message;
+      logLine(`log export failed: ${err.message}`);
+    }
   }
 }
 
@@ -547,6 +641,10 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`  Handoff:  ${target.file} (${target.where})`);
   console.log(`  Requests: ${wowRoot ? findSavedVariablesFile(wowRoot) || 'not found yet (log in + /reload)' : 'WoW install not found'}`);
   console.log(`  Status:   http://127.0.0.1:${PORT} (blank page, health only)`);
+  console.log(`  Log file: ${path.join(ROOT, 'RPHelperLog.txt')} (auto-updates)`);
   console.log('  Polling for in-game requests every 1s.');
 });
-setInterval(() => processGameRequest().catch((e) => console.error(`[watcher] ${e.message}`)), 1000);
+setInterval(() => {
+  exportAddonLog();
+  processGameRequest().catch((e) => logLine(`poll error: ${e.message}`));
+}, 1000);

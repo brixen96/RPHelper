@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.2"
+local VERSION = "0.2.3"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -107,6 +107,9 @@ local function LogEvent(msg)
   stamp = (ok and res) or "?"
   table.insert(db.events, 1, stamp .. " " .. tostring(msg))
   while #db.events > LOG_MAX do table.remove(db.events) end
+  -- Mirror as one string: the watcher's parser flattens tables, so a plain
+  -- string field is the reliable way for it to read the event log.
+  db.eventsText = table.concat(db.events, "\n")
 end
 
 -- (BuildLogReport / ExportLog live after PlayerInfoText — Lua locals are
@@ -259,45 +262,67 @@ local function BuildLogReport()
   return table.concat(lines, "\n")
 end
 
+-- The addon CANNOT write files (io sandboxed) or call CopyToClipboard
+-- (protected API - triggers the "blocked from an action" popup). So:
+--   1) stash the report in SavedVariables (eventsText) for the watcher,
+--      which writes RPHelperLog.txt itself with full file access, and
+--   2) show it in a selectable EditBox (normal text CAN be Ctrl+C'd).
 function ns.ExportLog()
   if not db then
     print("|cffffcc00RPHelper|r not loaded yet")
     return
   end
   local text = BuildLogReport()
-  local copied = false
-  -- 1) Clipboard (the user can't select text from the chat frame)
-  if CopyToClipboard then
-    local ok = pcall(CopyToClipboard, text)
-    copied = ok and true or false
+  db.eventsText = text
+  ns.ShowLogBox(text)
+  print("|cffffcc00RPHelper|r log shown in the box (select + Ctrl+C). The watcher also writes RPHelperLog.txt in the RPHelper folder.")
+end
+
+-- Selectable text box: WoW EditBoxes support normal select/copy, unlike
+-- the chat frame (which Blizzard blocks for addons).
+local logBox = nil
+function ns.ShowLogBox(text)
+  if not logBox then
+    local f = CreateFrame("Frame", "RPHelperLogBox", UIParent, "BackdropTemplate")
+    f:SetSize(560, 400)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:SetBackdrop({
+      bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+      edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+      tile = true, tileSize = 32, edgeSize = 32,
+      insets = { left = 8, right = 8, top = 8, bottom = 8 },
+    })
+    f:SetFrameStrata("FULLSCREEN")
+
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", 0, -14)
+    title:SetText("RPHelper log - select all + Ctrl+C")
+
+    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", -6, -6)
+    close:SetScript("OnClick", function() f:Hide() end)
+
+    local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", 16, -44)
+    scroll:SetPoint("BOTTOMRIGHT", -36, 16)
+    local box = CreateFrame("EditBox", nil, scroll)
+    box:SetSize(520, 340)
+    box:SetMultiLine(true)
+    box:SetAutoFocus(false)
+    box:SetFontObject("GameFontHighlightSmall")
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    scroll:SetScrollChild(box)
+    f.editBox = box
+    logBox = f
   end
-  -- 2) File (backup; may be blocked by the client's addon sandbox)
-  local written = false
-  local errMsg = ""
-  if io and io.open then
-    local ok, err = pcall(function()
-      local f = io.open("Interface\\AddOns\\RPHelper\\RPHelperLog.txt", "w")
-      if not f then error("io.open returned nil") end
-      f:write(text)
-      f:close()
-    end)
-    written = ok
-    if not ok then errMsg = tostring(err) end
-  else
-    errMsg = "io library unavailable"
-  end
-  if copied then
-    print("|cffffcc00RPHelper|r log COPIED TO CLIPBOARD - just paste it to the dev!")
-  end
-  if written then
-    print("|cffffcc00RPHelper|r log also written: Interface\\AddOns\\RPHelper\\RPHelperLog.txt")
-  end
-  if not copied and not written then
-    print("|cffffcc00RPHelper|r clipboard and file both unavailable (" .. errMsg .. ") - log below:")
-    for line in text:gmatch("[^\n]+") do
-      print("|cff9d9d9d" .. line .. "|r")
-    end
-  end
+  logBox.editBox:SetText(text or "")
+  logBox.editBox:SetFocus()
+  logBox:Show()
 end
 
 -- ---------------------------------------------------------------------------
@@ -826,6 +851,8 @@ function ns.RequestSuggestions()
   db.sceneDraft = scene
   db.personality = strtrim(panel.personalityBox:GetText() or "")
   db.quirks = strtrim(panel.quirksBox:GetText() or "")
+  db.chatPending = nil -- superseded: the watcher tracks ONE request via reqId
+  db.chatPendingText = nil
   db.reqId = RequestId()
   db.reqStatus = "pending"
   db.reqKind = "suggestions"
@@ -855,6 +882,8 @@ function ns.RequestDraft()
   if not db then return end
   db.personality = strtrim(panel.personalityBox:GetText() or "")
   db.quirks = strtrim(panel.quirksBox:GetText() or "")
+  db.chatPending = nil -- superseded: the watcher tracks ONE request via reqId
+  db.chatPendingText = nil
   db.reqId = RequestId()
   db.reqStatus = "pending"
   db.reqKind = "draft"
@@ -1000,6 +1029,8 @@ local function HandleSlash(msg)
     print(("|cffffcc00RPHelper|r version %s"):format(VERSION))
   elseif cmd == "log" or cmd == "export" then
     ns.ExportLog()
+  elseif cmd == "show" then
+    ns.ShowLogBox(db and db.eventsText or "(no log yet)")
   elseif cmd == "help" then
     print(("|cffffcc00RPHelper|r v%s commands:"):format(VERSION))
     print("  /rph — toggle panel")
@@ -1007,7 +1038,8 @@ local function HandleSlash(msg)
     print("  /rph set <scene> — describe scene and generate")
     print("  /rph tone <name> — " .. table.concat(TONES, ", "))
     print("  /rph reload — refresh panel from last answer")
-    print("  /rph log — export diagnostics for the dev")
+    print("  /rph log — show diagnostics (select + Ctrl+C)")
+    print("  /rph show — reopen the log box")
   else
     if not panel then CreatePanel() end
     if panel:IsShown() then panel:Hide() else ns.Refresh() end
