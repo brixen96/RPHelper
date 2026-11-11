@@ -51,6 +51,17 @@ function loadConfig() {
 const config = loadConfig();
 const PORT = config.port || 7331;
 
+// Crash guards: a silent death means no AI replies in game and no clue why.
+// Log loudly (and to a file) instead of exiting.
+const LOG_FILE = path.join(ROOT, 'watcher.log');
+function logCrash(kind, err) {
+  const line = `[${new Date().toISOString()}] ${kind}: ${err && (err.stack || err.message) || err}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch { /* best effort */ }
+  console.error(line.trim());
+}
+process.on('uncaughtException', (err) => logCrash('uncaughtException', err));
+process.on('unhandledRejection', (err) => logCrash('unhandledRejection', err));
+
 // Watcher stats, exposed on the status page
 const stats = {
   startedAt: new Date().toISOString(),
