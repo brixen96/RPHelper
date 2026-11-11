@@ -15,6 +15,7 @@ local ADDON_NAME, ns = ...
 -- ---------------------------------------------------------------------------
 local db = nil
 local panel = nil
+local chatFrame = nil
 local rows = {}
 
 local TONES = { "Neutral", "Warm/Friendly", "Gruff/Tough", "Witty/Flirty", "Formal/Noble", "Mysterious" }
@@ -23,6 +24,14 @@ local COUNTS = { 2, 3, 4, 5 }
 -- Chat capture: rolling buffer of recent IC speech / emotes for the scene box
 local chatLines = {}
 local MAX_CHAT_LINES = 12
+
+-- Shared request plumbing (declared early: chat + suggestion flows both use it)
+local WAIT_INTERVAL = 2.5
+local MAX_ATTEMPTS = 12
+
+local function RequestId()
+  return tostring(time()) .. "-" .. tostring(math.random(1000, 9999))
+end
 
 local function GetHandoff()
   return RPHelperHandoffData
@@ -315,6 +324,205 @@ local function CreatePanel()
 end
 
 -- ---------------------------------------------------------------------------
+-- AI chat panel (multi-turn discussion: letters, replies, RP etiquette)
+-- History lives in SavedVariables as a JSON string; the watcher reads it,
+-- calls the AI, and writes the reply back — same reload handshake.
+-- ---------------------------------------------------------------------------
+local function ChatHistory()
+  if not db then return {} end
+  if type(db.chatHistory) ~= "table" then db.chatHistory = {} end
+  return db.chatHistory
+end
+
+local function ChatPending()
+  if not db then return "" end
+  if type(db.chatPending) ~= "table" then db.chatPending = {} end
+  return db.chatPending
+end
+
+local function ChatJson()
+  local parts = {}
+  for _, e in ipairs(ChatHistory()) do
+    local role = e.r == "a" and "a" or "u"
+    local text = tostring(e.t or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
+    parts[#parts + 1] = ('{"r":"%s","t":"%s"}'):format(role, text)
+  end
+  return "[" .. table.concat(parts, ",") .. "]"
+end
+
+local function ChatAppend(role, text)
+  local h = ChatHistory()
+  h[#h + 1] = { r = role, t = text }
+  while #h > 40 do table.remove(h, 1) end
+end
+
+local function CreateChatPanel()
+  if chatFrame then return chatFrame end
+
+  local f = CreateFrame("Frame", "RPHelperChatPanel", UIParent, "BackdropTemplate")
+  f:SetSize(460, 480)
+  f:SetPoint("CENTER", UIParent, "CENTER", -380, 0)
+  f:SetMovable(true)
+  f:EnableMouse(true)
+  f:RegisterForDrag("LeftButton")
+  f:SetScript("OnDragStart", f.StartMoving)
+  f:SetScript("OnDragStop", f.StopMovingOrSizing)
+  f:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 8, right = 8, top = 8, bottom = 8 },
+  })
+  f:SetFrameStrata("DIALOG")
+
+  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  title:SetPoint("TOP", 0, -14)
+  title:SetText("RPHelper Chat")
+
+  local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+  close:SetPoint("TOPRIGHT", -6, -6)
+  close:SetScript("OnClick", function() f:Hide() end)
+
+  local status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  status:SetPoint("TOP", title, "BOTTOM", 0, -6)
+  status:SetWidth(420)
+  status:SetJustifyH("CENTER")
+  status:SetText("Ask about letters, replies, RP etiquette...")
+  f.statusFs = status
+
+  -- History display (scrollable) — sits above the input row
+  local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+  scroll:SetPoint("TOPLEFT", 16, -44)
+  scroll:SetPoint("BOTTOMRIGHT", -36, 108)
+  local historyBox = CreateFrame("EditBox", nil, scroll)
+  historyBox:SetSize(400, 400)
+  historyBox:SetMultiLine(true)
+  historyBox:SetAutoFocus(false)
+  historyBox:SetFontObject("GameFontHighlight")
+  historyBox:SetText("")
+  historyBox:Disable()
+  scroll:SetScrollChild(historyBox)
+  f.historyBox = historyBox
+  f.scroll = scroll
+
+  -- Input box (bottom row, below the history scroll)
+  local input = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  input:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 46)
+  input:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36, 46)
+  input:SetHeight(44)
+  input:SetFontObject("GameFontHighlight")
+  input:SetMaxLetters(600)
+  input:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  input:SetScript("OnEnterPressed", function(self)
+    self:ClearFocus()
+    ns.SendChat()
+  end)
+  f.inputBox = input
+
+  local inputLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  inputLabel:SetPoint("BOTTOMLEFT", input, "TOPLEFT", 2, 4)
+  inputLabel:SetText("Your message (Enter to send):")
+
+  local sendBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  sendBtn:SetSize(90, 24)
+  sendBtn:SetPoint("BOTTOMRIGHT", -16, 14)
+  sendBtn:SetText("Send")
+  sendBtn:SetScript("OnClick", function() ns.SendChat() end)
+  f.sendBtn = sendBtn
+
+  local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  clearBtn:SetSize(90, 24)
+  clearBtn:SetPoint("RIGHT", sendBtn, "LEFT", -8, 0)
+  clearBtn:SetText("Clear")
+  clearBtn:SetScript("OnClick", function()
+    db.chatHistory = {}
+    ns.RefreshChat()
+  end)
+  f.clearBtn = clearBtn
+
+  f:Hide()
+  chatFrame = f
+  return f
+end
+
+function ns.RefreshChat()
+  if not chatFrame then CreateChatPanel() end
+  local lines = {}
+  for _, e in ipairs(ChatHistory()) do
+    if e.r == "a" then
+      lines[#lines + 1] = "|cffffcc00RPHelper:|r " .. tostring(e.t or "")
+    else
+      lines[#lines + 1] = "|cff1eff00You:|r " .. tostring(e.t or "")
+    end
+  end
+  if #lines == 0 then
+    lines[1] = "|cff9d9d9dNo conversation yet. Ask about a letter, a reply, or RP etiquette.|r"
+  end
+  chatFrame.historyBox:SetText(table.concat(lines, "\n\n"))
+  local pending = ChatPending()
+  if pending and pending.text and pending.text ~= "" then
+    chatFrame.statusFs:SetText("Sending... reloading UI, reply arrives in a moment.")
+  else
+    chatFrame.statusFs:SetText("Ask about letters, replies, RP etiquette...")
+  end
+  chatFrame:Show()
+end
+
+function ns.SendChat()
+  if not db then return end
+  if not chatFrame then CreateChatPanel() end
+  local text = strtrim(chatFrame.inputBox:GetText() or "")
+  if text == "" then return end
+  ChatAppend("u", text)
+  db.chatPending = { id = RequestId(), text = text, attempts = 0 }
+  db.chatJson = ChatJson()
+  chatFrame.inputBox:SetText("")
+  chatFrame.statusFs:SetText("Sending... reloading UI, reply arrives in a moment.")
+  print("|cffffcc00RPHelper|r sending chat message - UI reloads automatically...")
+  C_Timer.After(0.4, function()
+    ReloadUI()
+  end)
+end
+
+-- Called on load: if the companion answered the pending chat message,
+-- append it and reload once more to display (same bounded wait as requests).
+local function CheckChatReply()
+  local handoff = GetHandoff()
+  local pending = ChatPending()
+  if not (pending and pending.id) then return false end
+  if handoff and handoff.kind == "chat" and handoff.requestId and tostring(handoff.requestId) == tostring(pending.id) then
+    db.chatPending = nil
+    if handoff.error then
+      ChatAppend("a", "[error] " .. tostring(handoff.error))
+      print("|cffffcc00RPHelper|r chat AI error: " .. tostring(handoff.error))
+    else
+      ChatAppend("a", tostring(handoff.chatReply or "(empty reply)"))
+      print("|cffffcc00RPHelper|r chat reply received!")
+    end
+    C_Timer.After(0.4, function()
+      ReloadUI()
+    end)
+    return true
+  end
+  -- Not answered yet: bounded wait-reload loop (same cadence as requests)
+  local attempts = (pending.attempts or 0) + 1
+  pending.attempts = attempts
+  if attempts > MAX_ATTEMPTS then
+    db.chatPending = nil
+    ChatAppend("a", "[no answer - is the watcher running?]")
+    print("|cffffcc00RPHelper|r no chat answer from the companion. Start it: RPHelper.exe")
+    C_Timer.After(0.4, function()
+      ReloadUI()
+    end)
+    return true
+  end
+  C_Timer.After(WAIT_INTERVAL, function()
+    ReloadUI()
+  end)
+  return false
+end
+
+-- ---------------------------------------------------------------------------
 -- Player info capture (used by the companion app as fallback)
 -- ---------------------------------------------------------------------------
 local function CapturePlayerInfo()
@@ -441,10 +649,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Request flow
 -- ---------------------------------------------------------------------------
-local function RequestId()
-  return tostring(time()) .. "-" .. tostring(math.random(1000, 9999))
-end
-
 -- Writes a pending request into SavedVariables and reloads the UI so the
 -- game persists them to disk (where the companion app can read them).
 function ns.RequestSuggestions()
@@ -507,10 +711,7 @@ end
 -- The addon can only see the companion's answer after a UI reload (the
 -- handoff file is read at load time). While a request is pending we
 -- schedule a reload every few seconds until the answer arrives or we hit
--- the attempt cap.
-local WAIT_INTERVAL = 2.5
-local MAX_ATTEMPTS = 12
-
+-- the attempt cap. (WAIT_INTERVAL / MAX_ATTEMPTS declared at top of file.)
 local function ScheduleAnswerWait()
   if not (db and db.reqStatus == "pending") then return end
   local attempts = (db.reqAttempts or 0) + 1
@@ -532,6 +733,7 @@ end
 local function CheckHandoff()
   local handoff = GetHandoff()
   if not (db and db.reqStatus == "pending") then return false end
+  if handoff and handoff.kind == "chat" then return false end -- chat answers go to CheckChatReply
   if handoff and handoff.requestId and tostring(handoff.requestId) == tostring(db.reqId) then
     db.reqStatus = handoff.error and "failed" or "done"
     db.lastError = handoff.error
@@ -616,9 +818,12 @@ local function HandleSlash(msg)
       end
     end
     print("|cffffcc00RPHelper|r unknown tone. Options: " .. table.concat(TONES, ", "))
+  elseif cmd == "chat" then
+    ns.RefreshChat()
   elseif cmd == "help" then
     print("|cffffcc00RPHelper|r commands:")
     print("  /rph — toggle panel")
+    print("  /rph chat — AI chat panel (letters, replies, etiquette)")
     print("  /rph set <scene> — describe scene and generate")
     print("  /rph tone <name> — " .. table.concat(TONES, ", "))
     print("  /rph reload — refresh panel from last answer")
@@ -648,14 +853,14 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     SLASH_RPHELPER1 = "/rph"
     SlashCmdList.RPHELPER = HandleSlash
     CapturePlayerInfo()
-    if not CheckHandoff() then
+    if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()
       if handoff and handoff.suggestions and #handoff.suggestions > 0 then
         ns.Refresh()
       end
     end
-    print("|cffffcc00RPHelper|r loaded — type |cffffcc00/rph|r to open the panel.")
+    print("|cffffcc00RPHelper|r loaded — type |cffffcc00/rph|r for the panel, |cffffcc00/rph chat|r to talk to the AI.")
   elseif event == "PLAYER_LOGIN" or event == "PLAYER_LEVEL_UP" then
     CapturePlayerInfo()
   elseif event == "PLAYER_ENTERING_WORLD" then

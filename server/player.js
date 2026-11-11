@@ -119,7 +119,22 @@ export function parseSavedVariables(text) {
   while ((m = re.exec(text))) {
     const key = m[1];
     if (m[2] !== undefined) {
-      out[key] = m[2].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
+      // Single-pass Lua unescape — ordered sequential replaces corrupt
+      // sequences like \\n (escaped backslash + n) inside JSON values
+      out[key] = m[2].replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, g) => {
+        switch (g[0]) {
+          case 'n': return '\n';
+          case 't': return '\t';
+          case 'r': return '\r';
+          case 'a': return '\x07';
+          case 'b': return '\b';
+          case 'f': return '\f';
+          case 'v': return '\v';
+          case '0': return '\0';
+          case 'u': return String.fromCharCode(parseInt(g.slice(1), 16) || 0);
+          default: return g; // quotes, backslash, everything else
+        }
+      });
     } else if (m[3] !== undefined && out[key] === undefined) {
       out[key] = Number(m[3]);
     }
