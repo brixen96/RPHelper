@@ -38,9 +38,16 @@ export function deriveWowRoot(config) {
   return WOW_ROOT_CANDIDATES.find((c) => fs.existsSync(c)) || null;
 }
 
-/** Find the newest RPHelperDB.lua under WTF\Account (any account/realm/character). */
+/**
+ * Find the newest addon SavedVariables file under WTF\Account.
+ * CRITICAL: WoW names SV files after the ADDON FOLDER (RPHelper.lua),
+ * not after the variable inside it (RPHelperDB.lua). Account-wide
+ * (## SavedVariables:) files live in WTF\Account\<acct>\SavedVariables\,
+ * per-character ones in WTF\Account\<acct>\<realm>\<char>\SavedVariables\.
+ * Newest mtime wins. RPHelperDB.lua kept as a legacy fallback name.
+ */
 export function findSavedVariablesFile(wowRoot) {
-  const svName = 'RPHelperDB.lua';
+  const svNames = new Set(['RPHelper.lua', 'RPHelperDB.lua']);
   const accountDir = path.join(wowRoot, 'WTF', 'Account');
   let best = null;
   const walk = (dir, depth) => {
@@ -55,7 +62,7 @@ export function findSavedVariablesFile(wowRoot) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
         walk(full, depth + 1);
-      } else if (e.name === svName) {
+      } else if (svNames.has(e.name)) {
         let mtime = 0;
         try {
           mtime = fs.statSync(full).mtimeMs;

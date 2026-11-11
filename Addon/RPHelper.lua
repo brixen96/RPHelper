@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.1"
+local VERSION = "0.2.2"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -265,6 +265,13 @@ function ns.ExportLog()
     return
   end
   local text = BuildLogReport()
+  local copied = false
+  -- 1) Clipboard (the user can't select text from the chat frame)
+  if CopyToClipboard then
+    local ok = pcall(CopyToClipboard, text)
+    copied = ok and true or false
+  end
+  -- 2) File (backup; may be blocked by the client's addon sandbox)
   local written = false
   local errMsg = ""
   if io and io.open then
@@ -279,10 +286,14 @@ function ns.ExportLog()
   else
     errMsg = "io library unavailable"
   end
+  if copied then
+    print("|cffffcc00RPHelper|r log COPIED TO CLIPBOARD - just paste it to the dev!")
+  end
   if written then
-    print("|cffffcc00RPHelper|r log written: Interface\\AddOns\\RPHelper\\RPHelperLog.txt - send that file to the dev.")
-  else
-    print("|cffffcc00RPHelper|r file write failed (" .. errMsg .. ") - copy the log from chat below:")
+    print("|cffffcc00RPHelper|r log also written: Interface\\AddOns\\RPHelper\\RPHelperLog.txt")
+  end
+  if not copied and not written then
+    print("|cffffcc00RPHelper|r clipboard and file both unavailable (" .. errMsg .. ") - log below:")
     for line in text:gmatch("[^\n]+") do
       print("|cff9d9d9d" .. line .. "|r")
     end
@@ -522,6 +533,13 @@ local function CreatePanel()
     ns.RefreshChat()
   end)
   f.clearBtn = clearBtn
+
+  local copyBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  copyBtn:SetSize(80, 24)
+  copyBtn:SetPoint("RIGHT", clearBtn, "LEFT", -8, 0)
+  copyBtn:SetText("Copy log")
+  copyBtn:SetScript("OnClick", function() ns.ExportLog() end)
+  f.copyBtn = copyBtn
 
   -- Footer hint (short — sits left of the Send/Clear buttons)
   local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
