@@ -11,6 +11,59 @@
 local ADDON_NAME, ns = ...
 
 -- ---------------------------------------------------------------------------
+-- Client compat — this client (older private-server core) predates several
+-- modern APIs. Missing C_Timer silently killed the reload handshake:
+-- C_Timer.After (added in WoD) is what schedules ReloadUI after a request,
+-- so without it SavedVariables were never written and the watcher never
+-- saw a request. Shim it with a plain OnUpdate queue.
+-- ---------------------------------------------------------------------------
+local print = print or function(...)
+  local parts = {}
+  for i = 1, select("#", ...) do
+    parts[#parts + 1] = tostring(select(i, ...))
+  end
+  if DEFAULT_CHAT_FRAME then
+    DEFAULT_CHAT_FRAME:AddMessage(table.concat(parts, " "))
+  end
+end
+
+local time = time or os.time
+local date = date or os.date
+
+local wipe = wipe or function(t)
+  for k in pairs(t) do t[k] = nil end
+  return t
+end
+
+-- Always use our own timer (never trust the client's C_Timer on this core):
+-- a plain OnUpdate queue, no dependencies, works on every client version.
+local timerQueue = {}
+local timerDriver = CreateFrame("Frame")
+timerDriver:Hide()
+local timerAcc = 0
+timerDriver:SetScript("OnUpdate", function(_, elapsed)
+  timerAcc = timerAcc + elapsed
+  if timerAcc < 0.05 then return end
+  local dt = timerAcc
+  timerAcc = 0
+  for i = #timerQueue, 1, -1 do
+    local item = timerQueue[i]
+    item.remaining = item.remaining - dt
+    if item.remaining <= 0 then
+      table.remove(timerQueue, i)
+      item.callback()
+    end
+  end
+  if #timerQueue == 0 then timerDriver:Hide() end
+end)
+local C_Timer = {
+  After = function(delay, callback)
+    timerQueue[#timerQueue + 1] = { remaining = tonumber(delay) or 0, callback = callback }
+    timerDriver:Show()
+  end,
+}
+
+-- ---------------------------------------------------------------------------
 -- State
 -- ---------------------------------------------------------------------------
 local db = nil
@@ -282,26 +335,35 @@ local function CreatePanel()
   end)
   f.countDd = countDd
 
-  -- Button row: AI sheet draft + Write suggestions (right-anchored so it
-  -- can never overflow the panel edge)
+  -- Button row: on its OWN row below the dropdowns — tone + count + both
+  -- buttons on one row overflowed the panel (visible overlap in screenshot)
+  -- pcall wrappers: any error prints to chat instead of dying silently
+  -- (this is how the missing-C_Timer bug stayed invisible for so long)
+  local function safeCall(fn)
+    local ok, err = pcall(fn)
+    if not ok then
+      print("|cffffcc00RPHelper|r error: " .. tostring(err))
+    end
+  end
+
   local draftBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
   draftBtn:SetSize(110, 24)
-  draftBtn:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -14)
+  draftBtn:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -48)
   draftBtn:SetText("AI sheet draft")
-  draftBtn:SetScript("OnClick", function() ns.RequestDraft() end)
+  draftBtn:SetScript("OnClick", function() safeCall(ns.RequestDraft) end)
   f.draftBtn = draftBtn
 
   local generate = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
   generate:SetSize(150, 24)
   generate:SetPoint("RIGHT", draftBtn, "LEFT", -8, 0)
   generate:SetText("Write suggestions")
-  generate:SetScript("OnClick", function() ns.RequestSuggestions() end)
+  generate:SetScript("OnClick", function() safeCall(ns.RequestSuggestions) end)
   f.generateBtn = generate
 
   -- Suggestions container (fixed height so the chat section below has room)
   local container = CreateFrame("Frame", nil, f)
-  container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -54)
-  container:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -54)
+  container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -82)
+  container:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -82)
   container:SetHeight(170)
   f.rowsContainer = container
 
@@ -345,7 +407,12 @@ local function CreatePanel()
   sendBtn:SetSize(90, 24)
   sendBtn:SetPoint("BOTTOMRIGHT", -16, 14)
   sendBtn:SetText("Send")
-  sendBtn:SetScript("OnClick", function() ns.SendChat() end)
+  sendBtn:SetScript("OnClick", function()
+    local ok, err = pcall(ns.SendChat)
+    if not ok then
+      print("|cffffcc00RPHelper|r error: " .. tostring(err))
+    end
+  end)
   f.sendBtn = sendBtn
 
   local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -445,10 +512,10 @@ function ns.SendChat()
   panel.chatInput:SetText("")
   ns.RefreshChat()
   panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
-  print("|cffffcc00RPHelper|r sending chat message - UI reloads automatically...")
   C_Timer.After(0.4, function()
     ReloadUI()
   end)
+  print("|cffffcc00RPHelper|r sending chat message - UI reloads automatically...")
 end
 
 -- Called on load: if the companion answered the pending chat message,
@@ -652,10 +719,12 @@ function ns.RequestSuggestions()
   if panel and panel.statusFs then
     panel.statusFs:SetText("Sending request... reloading UI, suggestions arrive in a moment.")
   end
-  print("|cffffcc00RPHelper|r sending request - UI reloads automatically...")
+  -- Schedule the reload FIRST — if anything below fails, the handshake
+  -- must still happen (this ordering bug is why requests never sent)
   C_Timer.After(0.4, function()
     ReloadUI()
   end)
+  print("|cffffcc00RPHelper|r sending request - UI reloads automatically...")
 end
 
 -- AI sheet draft: asks the companion to expand the personality notes into a
@@ -677,10 +746,10 @@ function ns.RequestDraft()
   if panel and panel.statusFs then
     panel.statusFs:SetText("Drafting sheet from your notes... reloading UI.")
   end
-  print("|cffffcc00RPHelper|r drafting character sheet - UI reloads automatically...")
   C_Timer.After(0.4, function()
     ReloadUI()
   end)
+  print("|cffffcc00RPHelper|r drafting character sheet - UI reloads automatically...")
 end
 
 -- The addon can only see the companion's answer after a UI reload (the
