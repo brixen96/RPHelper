@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -92,6 +92,25 @@ end
 local function GetHandoff()
   return RPHelperHandoffData
 end
+
+-- ---------------------------------------------------------------------------
+-- Event log — ring buffer in SavedVariables so it survives reloads.
+-- /rph log exports it to a file the player can send us for debugging.
+-- ---------------------------------------------------------------------------
+local LOG_MAX = 80
+
+local function LogEvent(msg)
+  if not db then return end
+  if type(db.events) ~= "table" then db.events = {} end
+  local stamp
+  local ok, res = pcall(date, "%H:%M:%S")
+  stamp = (ok and res) or "?"
+  table.insert(db.events, 1, stamp .. " " .. tostring(msg))
+  while #db.events > LOG_MAX do table.remove(db.events) end
+end
+
+-- (BuildLogReport / ExportLog live after PlayerInfoText — Lua locals are
+-- only visible after their declaration, see below.)
 
 local function InsertIntoChat(text)
   if not text or text == "" then return end
@@ -194,6 +213,79 @@ end
 local function UpdateCharInfo()
   if panel and panel.charInfoFs then
     panel.charInfoFs:SetText(PlayerInfoText())
+  end
+end
+
+-- Diagnostic report (needs PlayerInfoText above — Lua local scoping)
+local function BuildLogReport()
+  local lines = {}
+  lines[#lines + 1] = ("RPHelper diagnostic export v%s  %s"):format(VERSION, tostring(date and date("%Y-%m-%d %H:%M:%S") or "?"))
+  if GetBuildInfo then
+    local ok, v = pcall(GetBuildInfo)
+    if ok and v then lines[#lines + 1] = "client build: " .. tostring(v) end
+  end
+  lines[#lines + 1] = "player: " .. PlayerInfoText()
+  lines[#lines + 1] = "C_Timer shim: own OnUpdate queue (client has no C_Timer)"
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "-- request state --"
+  lines[#lines + 1] = ("reqStatus=%s reqKind=%s reqId=%s attempts=%s"):format(
+    tostring(db and db.reqStatus), tostring(db and db.reqKind),
+    tostring(db and db.reqId), tostring(db and db.reqAttempts))
+  local cp = db and db.chatPending
+  lines[#lines + 1] = ("chatPending id=%s attempts=%s text=%s"):format(
+    tostring(cp and cp.id), tostring(cp and cp.attempts),
+    tostring(cp and cp.text and cp.text:sub(1, 60)))
+  lines[#lines + 1] = ("tone=%s count=%s sceneLen=%d"):format(
+    tostring(db and db.tone), tostring(db and db.count),
+    db and db.sceneDraft and #db.sceneDraft or 0)
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "-- handoff file --"
+  local h = GetHandoff()
+  if h then
+    lines[#lines + 1] = ("kind=%s requestId=%s generatedAt=%s error=%s suggestions=%d"):format(
+      tostring(h.kind), tostring(h.requestId), tostring(h.generatedAt),
+      tostring(h.error), h.suggestions and #h.suggestions or 0)
+  else
+    lines[#lines + 1] = "(RPHelperHandoffData is nil - file not loaded or empty)"
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "-- events (newest first) --"
+  for _, e in ipairs(db and db.events or {}) do
+    lines[#lines + 1] = tostring(e)
+  end
+  if not db or not db.events or #db.events == 0 then
+    lines[#lines + 1] = "(no events recorded yet)"
+  end
+  return table.concat(lines, "\n")
+end
+
+function ns.ExportLog()
+  if not db then
+    print("|cffffcc00RPHelper|r not loaded yet")
+    return
+  end
+  local text = BuildLogReport()
+  local written = false
+  local errMsg = ""
+  if io and io.open then
+    local ok, err = pcall(function()
+      local f = io.open("Interface\\AddOns\\RPHelper\\RPHelperLog.txt", "w")
+      if not f then error("io.open returned nil") end
+      f:write(text)
+      f:close()
+    end)
+    written = ok
+    if not ok then errMsg = tostring(err) end
+  else
+    errMsg = "io library unavailable"
+  end
+  if written then
+    print("|cffffcc00RPHelper|r log written: Interface\\AddOns\\RPHelper\\RPHelperLog.txt - send that file to the dev.")
+  else
+    print("|cffffcc00RPHelper|r file write failed (" .. errMsg .. ") - copy the log from chat below:")
+    for line in text:gmatch("[^\n]+") do
+      print("|cff9d9d9d" .. line .. "|r")
+    end
   end
 end
 
@@ -346,6 +438,7 @@ local function CreatePanel()
   local function safeCall(fn)
     local ok, err = pcall(fn)
     if not ok then
+      LogEvent("ERROR " .. tostring(err))
       print("|cffffcc00RPHelper|r error: " .. tostring(err))
     end
   end
@@ -414,6 +507,7 @@ local function CreatePanel()
   sendBtn:SetScript("OnClick", function()
     local ok, err = pcall(ns.SendChat)
     if not ok then
+      LogEvent("ERROR " .. tostring(err))
       print("|cffffcc00RPHelper|r error: " .. tostring(err))
     end
   end)
@@ -516,7 +610,9 @@ function ns.SendChat()
   panel.chatInput:SetText("")
   ns.RefreshChat()
   panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
+  LogEvent(("SEND chat id=%s len=%d"):format(reqId, #text))
   C_Timer.After(0.4, function()
+    LogEvent("RELOAD firing (chat)")
     ReloadUI()
   end)
   print("|cffffcc00RPHelper|r sending chat message - UI reloads automatically...")
@@ -529,6 +625,7 @@ local function CheckChatReply()
   local pending = ChatPending()
   if not (pending and pending.id) then return false end
   if handoff and handoff.kind == "chat" and handoff.requestId and tostring(handoff.requestId) == tostring(pending.id) then
+    LogEvent("REPLY chat matched id=" .. tostring(pending.id))
     db.chatPending = nil
     db.chatPendingText = nil
     db.reqStatus = "done" -- clear the shared pending flag too
@@ -547,10 +644,11 @@ local function CheckChatReply()
   -- Not answered yet: keep the panel visible so the wait is obvious, then
   -- bounded wait-reload loop (same cadence as requests)
   ns.RefreshChat()
-  panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(
-    (pending.attempts or 0) + 1, MAX_ATTEMPTS))
   local attempts = (pending.attempts or 0) + 1
   pending.attempts = attempts
+  LogEvent(("WAIT chat attempt=%d handoffKind=%s handoffId=%s"):format(
+    attempts, tostring(handoff and handoff.kind), tostring(handoff and handoff.requestId)))
+  panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
   if attempts > MAX_ATTEMPTS then
     db.chatPending = nil
     db.chatPendingText = nil
@@ -725,7 +823,9 @@ function ns.RequestSuggestions()
   end
   -- Schedule the reload FIRST — if anything below fails, the handshake
   -- must still happen (this ordering bug is why requests never sent)
+  LogEvent(("SEND suggestions id=%s sceneLen=%d"):format(db.reqId, #scene))
   C_Timer.After(0.4, function()
+    LogEvent("RELOAD firing (suggestions)")
     ReloadUI()
   end)
   print("|cffffcc00RPHelper|r sending request - UI reloads automatically...")
@@ -750,7 +850,9 @@ function ns.RequestDraft()
   if panel and panel.statusFs then
     panel.statusFs:SetText("Drafting sheet from your notes... reloading UI.")
   end
+  LogEvent("SEND draft id=" .. db.reqId)
   C_Timer.After(0.4, function()
+    LogEvent("RELOAD firing (draft)")
     ReloadUI()
   end)
   print("|cffffcc00RPHelper|r drafting character sheet - UI reloads automatically...")
@@ -764,6 +866,9 @@ local function ScheduleAnswerWait()
   if not (db and db.reqStatus == "pending") then return end
   local attempts = (db.reqAttempts or 0) + 1
   db.reqAttempts = attempts
+  local h = GetHandoff()
+  LogEvent(("WAIT attempt=%d handoffKind=%s handoffId=%s myId=%s"):format(
+    attempts, tostring(h and h.kind), tostring(h and h.requestId), tostring(db.reqId)))
   if attempts > MAX_ATTEMPTS then
     db.reqStatus = "failed"
     db.lastError = "no answer - is the companion running?"
@@ -786,6 +891,7 @@ local function CheckHandoff()
   if not (db and db.reqStatus == "pending") then return false end
   if db.reqKind == "chat" then return false end -- chat answers go to CheckChatReply
   if handoff and handoff.requestId and tostring(handoff.requestId) == tostring(db.reqId) then
+    LogEvent("REPLY matched id=" .. tostring(db.reqId) .. " kind=" .. tostring(handoff.kind))
     db.reqStatus = handoff.error and "failed" or "done"
     db.lastError = handoff.error
     if handoff.error then
@@ -874,6 +980,8 @@ local function HandleSlash(msg)
     ns.RefreshChat()
   elseif cmd == "version" or cmd == "v" then
     print(("|cffffcc00RPHelper|r version %s"):format(VERSION))
+  elseif cmd == "log" or cmd == "export" then
+    ns.ExportLog()
   elseif cmd == "help" then
     print(("|cffffcc00RPHelper|r v%s commands:"):format(VERSION))
     print("  /rph — toggle panel")
@@ -881,6 +989,7 @@ local function HandleSlash(msg)
     print("  /rph set <scene> — describe scene and generate")
     print("  /rph tone <name> — " .. table.concat(TONES, ", "))
     print("  /rph reload — refresh panel from last answer")
+    print("  /rph log — export diagnostics for the dev")
   else
     if not panel then CreatePanel() end
     if panel:IsShown() then panel:Hide() else ns.Refresh() end
@@ -907,6 +1016,12 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     SLASH_RPHELPER1 = "/rph"
     SlashCmdList.RPHELPER = HandleSlash
     CapturePlayerInfo()
+    LogEvent(("LOAD reqStatus=%s reqKind=%s reqId=%s chatPending=%s"):format(
+      tostring(db.reqStatus), tostring(db.reqKind), tostring(db.reqId),
+      tostring(db.chatPending and db.chatPending.id)))
+    local h = GetHandoff()
+    LogEvent(("LOAD handoff kind=%s id=%s gen=%s"):format(
+      tostring(h and h.kind), tostring(h and h.requestId), tostring(h and h.generatedAt)))
     if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()
