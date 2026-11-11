@@ -15,7 +15,6 @@ local ADDON_NAME, ns = ...
 -- ---------------------------------------------------------------------------
 local db = nil
 local panel = nil
-local chatFrame = nil
 local rows = {}
 
 local TONES = { "Neutral", "Warm/Friendly", "Gruff/Tough", "Witty/Flirty", "Formal/Noble", "Mysterious" }
@@ -96,7 +95,7 @@ local function LayoutRows(suggestions)
 
   local gap = 6
   local height = (container:GetHeight() - gap * (#suggestions - 1)) / #suggestions
-  height = math.max(36, math.min(height, 70))
+  height = math.max(26, math.min(height, 70))
 
   for i, suggestion in ipairs(suggestions) do
     local row = rows[i] or CreateRow(container, i)
@@ -148,7 +147,7 @@ local function CreatePanel()
   if panel then return panel end
 
   local f = CreateFrame("Frame", "RPHelperPanel", UIParent, "BackdropTemplate")
-  f:SetSize(440, 560)
+  f:SetSize(460, 760)
   f:SetPoint("CENTER", UIParent, "CENTER", 380, 0)
   f:SetMovable(true)
   f:EnableMouse(true)
@@ -299,16 +298,70 @@ local function CreatePanel()
   generate:SetScript("OnClick", function() ns.RequestSuggestions() end)
   f.generateBtn = generate
 
-  -- Suggestions container (below the button row)
+  -- Suggestions container (fixed height so the chat section below has room)
   local container = CreateFrame("Frame", nil, f)
   container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -54)
-  container:SetPoint("BOTTOMRIGHT", -16, 40)
+  container:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -54)
+  container:SetHeight(170)
   f.rowsContainer = container
 
-  -- Footer hint
+  -- AI chat section (merged into the main panel — only /rph needed)
+  local chatLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  chatLabel:SetPoint("TOPLEFT", container, "BOTTOMLEFT", 0, -10)
+  chatLabel:SetText("AI Chat - letters, replies, RP etiquette:")
+
+  local chatScroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+  chatScroll:SetPoint("TOPLEFT", chatLabel, "BOTTOMLEFT", 0, -6)
+  chatScroll:SetPoint("BOTTOMRIGHT", -36, 116)
+  local chatHistoryBox = CreateFrame("EditBox", nil, chatScroll)
+  chatHistoryBox:SetSize(400, 400)
+  chatHistoryBox:SetMultiLine(true)
+  chatHistoryBox:SetAutoFocus(false)
+  chatHistoryBox:SetFontObject("GameFontHighlight")
+  chatHistoryBox:SetText("")
+  chatHistoryBox:Disable()
+  chatScroll:SetScrollChild(chatHistoryBox)
+  f.chatHistoryBox = chatHistoryBox
+  f.chatScroll = chatScroll
+
+  local chatInput = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
+  chatInput:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 46)
+  chatInput:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36, 46)
+  chatInput:SetHeight(40)
+  chatInput:SetFontObject("GameFontHighlight")
+  chatInput:SetMaxLetters(600)
+  chatInput:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  chatInput:SetScript("OnEnterPressed", function(self)
+    self:ClearFocus()
+    ns.SendChat()
+  end)
+  f.chatInput = chatInput
+
+  local chatInputLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  chatInputLabel:SetPoint("BOTTOMLEFT", chatInput, "TOPLEFT", 2, 4)
+  chatInputLabel:SetText("Message the AI (Enter to send):")
+
+  local sendBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  sendBtn:SetSize(90, 24)
+  sendBtn:SetPoint("BOTTOMRIGHT", -16, 14)
+  sendBtn:SetText("Send")
+  sendBtn:SetScript("OnClick", function() ns.SendChat() end)
+  f.sendBtn = sendBtn
+
+  local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  clearBtn:SetSize(90, 24)
+  clearBtn:SetPoint("RIGHT", sendBtn, "LEFT", -8, 0)
+  clearBtn:SetText("Clear")
+  clearBtn:SetScript("OnClick", function()
+    db.chatHistory = {}
+    ns.RefreshChat()
+  end)
+  f.clearBtn = clearBtn
+
+  -- Footer hint (short — sits left of the Send/Clear buttons)
   local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  hint:SetPoint("BOTTOMLEFT", 16, 14)
-  hint:SetText("/rph toggle · /rph set <scene> · /rph tone <name> · /rph help")
+  hint:SetPoint("BOTTOMLEFT", 16, 20)
+  hint:SetText("/rph help")
 
   -- Persist the sheet whenever the panel closes (SavedVariables save on reload/logout)
   f:SetScript("OnHide", function(self)
@@ -356,97 +409,8 @@ local function ChatAppend(role, text)
   while #h > 40 do table.remove(h, 1) end
 end
 
-local function CreateChatPanel()
-  if chatFrame then return chatFrame end
-
-  local f = CreateFrame("Frame", "RPHelperChatPanel", UIParent, "BackdropTemplate")
-  f:SetSize(460, 480)
-  f:SetPoint("CENTER", UIParent, "CENTER", -380, 0)
-  f:SetMovable(true)
-  f:EnableMouse(true)
-  f:RegisterForDrag("LeftButton")
-  f:SetScript("OnDragStart", f.StartMoving)
-  f:SetScript("OnDragStop", f.StopMovingOrSizing)
-  f:SetBackdrop({
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 8, right = 8, top = 8, bottom = 8 },
-  })
-  f:SetFrameStrata("DIALOG")
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOP", 0, -14)
-  title:SetText("RPHelper Chat")
-
-  local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-  close:SetPoint("TOPRIGHT", -6, -6)
-  close:SetScript("OnClick", function() f:Hide() end)
-
-  local status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  status:SetPoint("TOP", title, "BOTTOM", 0, -6)
-  status:SetWidth(420)
-  status:SetJustifyH("CENTER")
-  status:SetText("Ask about letters, replies, RP etiquette...")
-  f.statusFs = status
-
-  -- History display (scrollable) — sits above the input row
-  local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  scroll:SetPoint("TOPLEFT", 16, -44)
-  scroll:SetPoint("BOTTOMRIGHT", -36, 108)
-  local historyBox = CreateFrame("EditBox", nil, scroll)
-  historyBox:SetSize(400, 400)
-  historyBox:SetMultiLine(true)
-  historyBox:SetAutoFocus(false)
-  historyBox:SetFontObject("GameFontHighlight")
-  historyBox:SetText("")
-  historyBox:Disable()
-  scroll:SetScrollChild(historyBox)
-  f.historyBox = historyBox
-  f.scroll = scroll
-
-  -- Input box (bottom row, below the history scroll)
-  local input = CreateFrame("EditBox", nil, f, "InputScrollFrameTemplate")
-  input:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 46)
-  input:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36, 46)
-  input:SetHeight(44)
-  input:SetFontObject("GameFontHighlight")
-  input:SetMaxLetters(600)
-  input:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-  input:SetScript("OnEnterPressed", function(self)
-    self:ClearFocus()
-    ns.SendChat()
-  end)
-  f.inputBox = input
-
-  local inputLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  inputLabel:SetPoint("BOTTOMLEFT", input, "TOPLEFT", 2, 4)
-  inputLabel:SetText("Your message (Enter to send):")
-
-  local sendBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  sendBtn:SetSize(90, 24)
-  sendBtn:SetPoint("BOTTOMRIGHT", -16, 14)
-  sendBtn:SetText("Send")
-  sendBtn:SetScript("OnClick", function() ns.SendChat() end)
-  f.sendBtn = sendBtn
-
-  local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  clearBtn:SetSize(90, 24)
-  clearBtn:SetPoint("RIGHT", sendBtn, "LEFT", -8, 0)
-  clearBtn:SetText("Clear")
-  clearBtn:SetScript("OnClick", function()
-    db.chatHistory = {}
-    ns.RefreshChat()
-  end)
-  f.clearBtn = clearBtn
-
-  f:Hide()
-  chatFrame = f
-  return f
-end
-
 function ns.RefreshChat()
-  if not chatFrame then CreateChatPanel() end
+  if not panel then CreatePanel() end
   local lines = {}
   for _, e in ipairs(ChatHistory()) do
     if e.r == "a" then
@@ -458,26 +422,29 @@ function ns.RefreshChat()
   if #lines == 0 then
     lines[1] = "|cff9d9d9dNo conversation yet. Ask about a letter, a reply, or RP etiquette.|r"
   end
-  chatFrame.historyBox:SetText(table.concat(lines, "\n\n"))
-  local pending = ChatPending()
-  if pending and pending.text and pending.text ~= "" then
-    chatFrame.statusFs:SetText("Sending... reloading UI, reply arrives in a moment.")
-  else
-    chatFrame.statusFs:SetText("Ask about letters, replies, RP etiquette...")
-  end
-  chatFrame:Show()
+  panel.chatHistoryBox:SetText(table.concat(lines, "\n\n"))
+  panel:Show()
 end
 
 function ns.SendChat()
   if not db then return end
-  if not chatFrame then CreateChatPanel() end
-  local text = strtrim(chatFrame.inputBox:GetText() or "")
+  if not panel then CreatePanel() end
+  local text = strtrim(panel.chatInput:GetText() or "")
   if text == "" then return end
   ChatAppend("u", text)
-  db.chatPending = { id = RequestId(), text = text, attempts = 0 }
+  local reqId = RequestId()
+  db.chatPending = { id = reqId, text = text, attempts = 0 }
   db.chatJson = ChatJson()
-  chatFrame.inputBox:SetText("")
-  chatFrame.statusFs:SetText("Sending... reloading UI, reply arrives in a moment.")
+  -- The watcher requires the standard request fields + chatPendingText
+  db.reqId = reqId
+  db.reqStatus = "pending"
+  db.reqKind = "chat"
+  db.reqAttempts = 0
+  db.lastError = nil
+  db.chatPendingText = text
+  panel.chatInput:SetText("")
+  ns.RefreshChat()
+  panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
   print("|cffffcc00RPHelper|r sending chat message - UI reloads automatically...")
   C_Timer.After(0.4, function()
     ReloadUI()
@@ -492,6 +459,8 @@ local function CheckChatReply()
   if not (pending and pending.id) then return false end
   if handoff and handoff.kind == "chat" and handoff.requestId and tostring(handoff.requestId) == tostring(pending.id) then
     db.chatPending = nil
+    db.chatPendingText = nil
+    db.reqStatus = "done" -- clear the shared pending flag too
     if handoff.error then
       ChatAppend("a", "[error] " .. tostring(handoff.error))
       print("|cffffcc00RPHelper|r chat AI error: " .. tostring(handoff.error))
@@ -504,11 +473,17 @@ local function CheckChatReply()
     end)
     return true
   end
-  -- Not answered yet: bounded wait-reload loop (same cadence as requests)
+  -- Not answered yet: keep the panel visible so the wait is obvious, then
+  -- bounded wait-reload loop (same cadence as requests)
+  ns.RefreshChat()
+  panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(
+    (pending.attempts or 0) + 1, MAX_ATTEMPTS))
   local attempts = (pending.attempts or 0) + 1
   pending.attempts = attempts
   if attempts > MAX_ATTEMPTS then
     db.chatPending = nil
+    db.chatPendingText = nil
+    db.reqStatus = "failed"
     ChatAppend("a", "[no answer - is the watcher running?]")
     print("|cffffcc00RPHelper|r no chat answer from the companion. Start it: RPHelper.exe")
     C_Timer.After(0.4, function()
@@ -718,11 +693,14 @@ local function ScheduleAnswerWait()
   db.reqAttempts = attempts
   if attempts > MAX_ATTEMPTS then
     db.reqStatus = "failed"
-    db.lastError = "no answer — is the companion app running?"
-    print("|cffffcc00RPHelper|r no answer from the companion app. Start it with: npm start")
+    db.lastError = "no answer - is the companion running?"
+    print("|cffffcc00RPHelper|r no answer from the companion. Start it: RPHelper.exe")
     ns.Refresh()
     return
   end
+  -- Keep the panel visible during the wait so the reloads are obvious
+  ns.Refresh()
+  panel.statusFs:SetText(("Waiting for AI... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
   C_Timer.After(WAIT_INTERVAL, function()
     ReloadUI()
   end)
@@ -733,7 +711,7 @@ end
 local function CheckHandoff()
   local handoff = GetHandoff()
   if not (db and db.reqStatus == "pending") then return false end
-  if handoff and handoff.kind == "chat" then return false end -- chat answers go to CheckChatReply
+  if db.reqKind == "chat" then return false end -- chat answers go to CheckChatReply
   if handoff and handoff.requestId and tostring(handoff.requestId) == tostring(db.reqId) then
     db.reqStatus = handoff.error and "failed" or "done"
     db.lastError = handoff.error
@@ -769,6 +747,7 @@ end
 function ns.Refresh()
   if not panel then CreatePanel() end
   UpdateCharInfo()
+  ns.RefreshChat() -- keep the merged chat section in sync too
   local handoff = GetHandoff()
   if handoff and handoff.error then
     panel.statusFs:SetText(("AI error: %s — try again or check the companion app."):format(handoff.error))
