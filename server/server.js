@@ -75,6 +75,7 @@ const stats = {
   requestsServed: 0,
   lastRequestAt: null,
   lastError: null,
+  lastPollAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +102,14 @@ function resolveHandoffTarget() {
     }
   }
   return { file: path.join(REPO_ADDON_DIR, 'RPHelperHandoff.lua'), where: 'repo' };
+}
+
+/** Chat replies get their OWN mailbox file — a single shared handoff file
+ * meant a chat reply could be overwritten by a suggestions answer before
+ * the addon ever read it. */
+function resolveChatHandoffTarget() {
+  const main = resolveHandoffTarget();
+  return { file: path.join(path.dirname(main.file), 'RPHelperChatHandoff.lua'), where: main.where };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,27 +175,38 @@ function extractJson(text) {
   return null;
 }
 
+const AI_TIMEOUT_MS = 30_000;
+
 async function callAIMessages(messages) {
   const or = config.openrouter || {};
   if (!or.apiKey) return null;
-  const res = await fetch(`${or.baseUrl || 'https://openrouter.ai/api/v1'}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${or.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: or.model || 'deepseek/deepseek-v4-flash',
-      temperature: 0.9,
-      messages,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 300)}`);
+  // Hard timeout: a hung fetch used to block the whole poller for tens of
+  // minutes (processing=true, no logs) — every request behind it starved.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error(`AI request timed out after ${AI_TIMEOUT_MS / 1000}s`)), AI_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${or.baseUrl || 'https://openrouter.ai/api/v1'}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${or.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: or.model || 'deepseek/deepseek-v4-flash',
+        temperature: 0.9,
+        messages,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 300)}`);
+    }
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content || '';
+  } finally {
+    clearTimeout(timer);
   }
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content || '';
 }
 
 function callAI(systemPrompt, userMsg) {
@@ -404,6 +424,10 @@ const server = http.createServer((req, res) => {
         requestsServed: stats.requestsServed,
         lastRequestAt: stats.lastRequestAt,
         lastError: stats.lastError,
+        lastPollAt: stats.lastPollAt,
+        processingForSec: processing ? Math.round((Date.now() - processingSince) / 1000) : 0,
+        lastMainId,
+        lastChatId,
       });
     }
     if (req.method === 'GET') return serveStatic(req, res);
@@ -438,28 +462,21 @@ function saveState(obj) {
     console.warn(`[state] could not persist: ${err.message}`);
   }
 }
-let lastProcessedId = loadState().lastProcessedId ?? null;
+const _state = loadState();
+let lastMainId = _state.lastMainId ?? _state.lastProcessedId ?? null; // migrate old key
+let lastChatId = _state.lastChatId ?? null;
 let processing = false;
+let processingSince = 0;
+let stallLogged = false;
 
-async function processGameRequest() {
-  if (processing) return;
-  const wowRoot = deriveWowRoot(config);
-  if (!wowRoot) return;
-  const sv = findSavedVariablesFile(wowRoot);
-  if (!sv) return;
-
-  let parsed;
-  try {
-    parsed = parseSavedVariables(fs.readFileSync(sv, 'utf8'));
-  } catch {
-    return;
-  }
-  const reqId = parsed.reqId;
-  if (!reqId || String(reqId) === String(lastProcessedId)) return;
-  if (parsed.reqStatus !== 'pending') return;
-
+/** Process ONE request (serial — single handoff writer, but timeout-bounded).
+ * lane 'chat' writes to the chat mailbox, 'main' to the suggestions mailbox. */
+async function runRequest({ lane, reqId, parsed }) {
   processing = true;
-  lastProcessedId = String(reqId);
+  processingSince = Date.now();
+  stallLogged = false;
+  if (lane === 'chat') lastChatId = reqId;
+  else lastMainId = reqId;
   try {
     const payload = {
       character: {
@@ -477,8 +494,8 @@ async function processGameRequest() {
       count: Number(parsed.reqCount) || 3,
     };
 
-    const isDraft = parsed.reqKind === 'draft';
-    const isChat = parsed.reqKind === 'chat';
+    const isChat = lane === 'chat';
+    const isDraft = !isChat && parsed.reqKind === 'draft';
     const kindLabel = isChat ? 'chat' : isDraft ? 'sheet draft' : payload.tone;
     logLine(`game request ${reqId} (${kindLabel}) - generating...`);
     let suggestions = null;
@@ -513,7 +530,7 @@ async function processGameRequest() {
     }
     if (error) { suggestions = []; draft = null; chatReply = null; }
 
-    const target = resolveHandoffTarget();
+    const target = isChat ? resolveChatHandoffTarget() : resolveHandoffTarget();
     fs.mkdirSync(path.dirname(target.file), { recursive: true });
     fs.writeFileSync(
       target.file,
@@ -540,12 +557,54 @@ async function processGameRequest() {
     stats.requestsServed += 1;
     stats.lastRequestAt = new Date().toISOString();
     stats.lastError = error || null;
-    saveState({ lastProcessedId: String(reqId) });
   } catch (err) {
     logLine(`ERROR ${err.stack || err.message}`);
     stats.lastError = err.message;
   } finally {
+    saveState({ lastMainId, lastChatId });
     processing = false;
+  }
+}
+
+/** One poll tick: chat lane has PRIORITY (it used to starve behind main
+ * requests), main lane skips chat-kind requests entirely. */
+async function poll() {
+  stats.lastPollAt = new Date().toISOString();
+  if (processing) {
+    const heldFor = Date.now() - processingSince;
+    if (heldFor > 35_000 && !stallLogged) {
+      stallLogged = true;
+      logLine(`STALL: AI call running for ${Math.round(heldFor / 1000)}s (should be impossible with ${AI_TIMEOUT_MS / 1000}s timeout)`);
+    }
+    return;
+  }
+  const wowRoot = deriveWowRoot(config);
+  if (!wowRoot) return;
+  const sv = findSavedVariablesFile(wowRoot);
+  if (!sv) return;
+
+  let parsed;
+  try {
+    parsed = parseSavedVariables(fs.readFileSync(sv, 'utf8'));
+  } catch {
+    return;
+  }
+
+  // Chat lane — keyed on the flat chatPendingId field (immune to the main
+  // request fields being overwritten by a newer suggestions/draft send).
+  let chatId = parsed.chatPendingId ? String(parsed.chatPendingId) : null;
+  if (!chatId && parsed.reqKind === 'chat' && parsed.reqStatus === 'pending' && parsed.reqId) {
+    chatId = String(parsed.reqId); // legacy fallback (pre-0.2.4 addon)
+  }
+  if (chatId && chatId !== lastChatId) {
+    await runRequest({ lane: 'chat', reqId: chatId, parsed });
+    return;
+  }
+
+  // Main lane (suggestions / sheet draft)
+  const reqId = parsed.reqId ? String(parsed.reqId) : null;
+  if (reqId && reqId !== lastMainId && parsed.reqStatus === 'pending' && parsed.reqKind !== 'chat') {
+    await runRequest({ lane: 'main', reqId, parsed });
   }
 }
 
@@ -574,6 +633,7 @@ function buildDiagnosticText() {
   lines.push(`RPHelper diagnostic export (watcher) ${new Date().toISOString()}`);
   lines.push(`model: ${config.openrouter?.model || '?'}  apiKey: ${config.openrouter?.apiKey ? 'configured' : 'MISSING'}`);
   lines.push(`uptime: ${Math.round(process.uptime())}s  served: ${stats.requestsServed}  last: ${stats.lastRequestAt || '-'}  lastError: ${stats.lastError || '-'}`);
+  lines.push(`lastPoll: ${stats.lastPollAt || '-'}  processing: ${processing ? `${Math.round((Date.now() - processingSince) / 1000)}s` : 'no'}  lastMainId: ${lastMainId || '-'}  lastChatId: ${lastChatId || '-'}`);
   lines.push(`sv file: ${sv || 'NOT FOUND'}`);
   if (!sv) return lines.join('\n');
 
@@ -595,7 +655,7 @@ function buildDiagnosticText() {
   lines.push('');
   lines.push('-- request state (from addon SavedVariables) --');
   lines.push(`reqStatus=${parsed.reqStatus} reqKind=${parsed.reqKind} reqId=${parsed.reqId} attempts=${parsed.reqAttempts}`);
-  lines.push(`chatPendingText=${parsed.chatPendingText || '-'}`);
+  lines.push(`chatPendingId=${parsed.chatPendingId || '-'} chatPendingText=${parsed.chatPendingText || '-'}`);
   lines.push(`tone=${parsed.tone} count=${parsed.reqCount} scene=${parsed.reqScene || '-'}`);
   lines.push('');
   lines.push('-- handoff file (watcher answers) --');
@@ -642,9 +702,19 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`  Requests: ${wowRoot ? findSavedVariablesFile(wowRoot) || 'not found yet (log in + /reload)' : 'WoW install not found'}`);
   console.log(`  Status:   http://127.0.0.1:${PORT} (blank page, health only)`);
   console.log(`  Log file: ${path.join(ROOT, 'RPHelperLog.txt')} (auto-updates)`);
-  console.log('  Polling for in-game requests every 1s.');
+  console.log('  Polling for in-game requests every 1s (chat lane has priority).');
 });
-setInterval(() => {
-  exportAddonLog();
-  processGameRequest().catch((e) => logLine(`poll error: ${e.message}`));
-}, 1000);
+
+// Self-rescheduling loop: the next tick is queued only after the current
+// one finishes — a slow/hung tick can never silently skip future polls
+// (unlike setInterval, which was part of the starvation problem).
+async function pollLoop() {
+  try {
+    exportAddonLog();
+    await poll();
+  } catch (e) {
+    logLine(`poll error: ${e.stack || e.message}`);
+  }
+  setTimeout(pollLoop, 1000);
+}
+pollLoop();

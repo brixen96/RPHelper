@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.3"
+local VERSION = "0.2.4"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -82,8 +82,9 @@ local chatLines = {}
 local MAX_CHAT_LINES = 12
 
 -- Shared request plumbing (declared early: chat + suggestion flows both use it)
-local WAIT_INTERVAL = 2.5
-local MAX_ATTEMPTS = 12
+local WAIT_INTERVAL = 2
+local MAX_ATTEMPTS = 45    -- 90s auto-reload window for suggestions/draft
+local CHAT_MAX_ATTEMPTS = 60 -- 120s for chat replies
 
 local function RequestId()
   return tostring(time()) .. "-" .. tostring(math.random(1000, 9999))
@@ -91,6 +92,12 @@ end
 
 local function GetHandoff()
   return RPHelperHandoffData
+end
+
+-- Chat replies live in their OWN mailbox file so a suggestions answer can
+-- never overwrite a chat reply before the addon reads it.
+local function GetChatHandoff()
+  return RPHelperChatHandoffData
 end
 
 -- ---------------------------------------------------------------------------
@@ -643,13 +650,15 @@ function ns.SendChat()
   local reqId = RequestId()
   db.chatPending = { id = reqId, text = text, attempts = 0 }
   db.chatJson = ChatJson()
-  -- The watcher requires the standard request fields + chatPendingText
+  -- Flat id field: the watcher's chat lane keys on this, so a newer
+  -- suggestions/draft send (which overwrites reqId) can't cancel it.
+  db.chatPendingId = reqId
+  db.chatPendingText = text
   db.reqId = reqId
   db.reqStatus = "pending"
   db.reqKind = "chat"
   db.reqAttempts = 0
   db.lastError = nil
-  db.chatPendingText = text
   panel.chatInput:SetText("")
   ns.RefreshChat()
   panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
@@ -664,14 +673,15 @@ end
 -- Called on load: if the companion answered the pending chat message,
 -- append it and reload once more to display (same bounded wait as requests).
 local function CheckChatReply()
-  local handoff = GetHandoff()
+  local handoff = GetChatHandoff()
   local pending = ChatPending()
   if not (pending and pending.id) then return false end
   if handoff and handoff.kind == "chat" and handoff.requestId and tostring(handoff.requestId) == tostring(pending.id) then
     LogEvent("REPLY chat matched id=" .. tostring(pending.id))
     db.chatPending = nil
+    db.chatPendingId = nil
     db.chatPendingText = nil
-    db.reqStatus = "done" -- clear the shared pending flag too
+    db.reqStatus = "done"
     if handoff.error then
       ChatAppend("a", "[error] " .. tostring(handoff.error))
       print("|cffffcc00RPHelper|r chat AI error: " .. tostring(handoff.error))
@@ -684,25 +694,24 @@ local function CheckChatReply()
     end)
     return true
   end
-  -- Not answered yet: keep the panel visible so the wait is obvious, then
-  -- bounded wait-reload loop (same cadence as requests)
+  -- Not answered yet: bounded wait-reload loop
   ns.RefreshChat()
-  local attempts = (pending.attempts or 0) + 1
+  local attempts = pending.attempts or 0
+  if attempts >= CHAT_MAX_ATTEMPTS then
+    -- Auto-reload window exhausted: KEEP the pending request (a late reply
+    -- still displays on the next load) but stop the reload storm.
+    if not pending.gaveUp then
+      pending.gaveUp = true
+      LogEvent("WAIT chat gave up - kept pending for late display")
+      print("|cffffcc00RPHelper|r still waiting on the watcher - see RPHelperLog.txt. The reply will appear on the next reload.")
+    end
+    return true
+  end
+  attempts = attempts + 1
   pending.attempts = attempts
   LogEvent(("WAIT chat attempt=%d handoffKind=%s handoffId=%s"):format(
     attempts, tostring(handoff and handoff.kind), tostring(handoff and handoff.requestId)))
-  panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
-  if attempts > MAX_ATTEMPTS then
-    db.chatPending = nil
-    db.chatPendingText = nil
-    db.reqStatus = "failed"
-    ChatAppend("a", "[no answer - is the watcher running?]")
-    print("|cffffcc00RPHelper|r no chat answer from the companion. Start it: RPHelper.exe")
-    C_Timer.After(0.4, function()
-      ReloadUI()
-    end)
-    return true
-  end
+  panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, CHAT_MAX_ATTEMPTS))
   C_Timer.After(WAIT_INTERVAL, function()
     ReloadUI()
   end)
@@ -851,8 +860,9 @@ function ns.RequestSuggestions()
   db.sceneDraft = scene
   db.personality = strtrim(panel.personalityBox:GetText() or "")
   db.quirks = strtrim(panel.quirksBox:GetText() or "")
-  db.chatPending = nil -- superseded: the watcher tracks ONE request via reqId
-  db.chatPendingText = nil
+  -- NOTE: do NOT clear chatPending here — chat and suggestions now run on
+  -- independent watcher lanes and can be in flight at the same time.
+  db.waitGaveUp = nil
   db.reqId = RequestId()
   db.reqStatus = "pending"
   db.reqKind = "suggestions"
@@ -882,8 +892,7 @@ function ns.RequestDraft()
   if not db then return end
   db.personality = strtrim(panel.personalityBox:GetText() or "")
   db.quirks = strtrim(panel.quirksBox:GetText() or "")
-  db.chatPending = nil -- superseded: the watcher tracks ONE request via reqId
-  db.chatPendingText = nil
+  db.waitGaveUp = nil
   db.reqId = RequestId()
   db.reqStatus = "pending"
   db.reqKind = "draft"
@@ -911,18 +920,23 @@ end
 -- the attempt cap. (WAIT_INTERVAL / MAX_ATTEMPTS declared at top of file.)
 local function ScheduleAnswerWait()
   if not (db and db.reqStatus == "pending") then return end
-  local attempts = (db.reqAttempts or 0) + 1
+  local attempts = db.reqAttempts or 0
+  if attempts >= MAX_ATTEMPTS then
+    -- Auto-reload window exhausted: KEEP reqStatus pending so a LATE reply
+    -- still displays on the next load — just stop the reload storm.
+    if not db.waitGaveUp then
+      db.waitGaveUp = true
+      LogEvent("WAIT gave up - kept pending for late display")
+      print("|cffffcc00RPHelper|r still waiting on the watcher - see RPHelperLog.txt. The reply will appear on the next reload.")
+    end
+    ns.Refresh()
+    return
+  end
+  attempts = attempts + 1
   db.reqAttempts = attempts
   local h = GetHandoff()
   LogEvent(("WAIT attempt=%d handoffKind=%s handoffId=%s myId=%s"):format(
     attempts, tostring(h and h.kind), tostring(h and h.requestId), tostring(db.reqId)))
-  if attempts > MAX_ATTEMPTS then
-    db.reqStatus = "failed"
-    db.lastError = "no answer - is the companion running?"
-    print("|cffffcc00RPHelper|r no answer from the companion. Start it: RPHelper.exe")
-    ns.Refresh()
-    return
-  end
   -- Keep the panel visible during the wait so the reloads are obvious
   ns.Refresh()
   panel.statusFs:SetText(("Waiting for AI... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
@@ -1072,6 +1086,9 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     local h = GetHandoff()
     LogEvent(("LOAD handoff kind=%s id=%s gen=%s"):format(
       tostring(h and h.kind), tostring(h and h.requestId), tostring(h and h.generatedAt)))
+    local hc = GetChatHandoff()
+    LogEvent(("LOAD chat-handoff kind=%s id=%s gen=%s"):format(
+      tostring(hc and hc.kind), tostring(hc and hc.requestId), tostring(hc and hc.generatedAt)))
     if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()
