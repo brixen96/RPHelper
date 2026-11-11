@@ -20,6 +20,10 @@ local rows = {}
 local TONES = { "Neutral", "Warm/Friendly", "Gruff/Tough", "Witty/Flirty", "Formal/Noble", "Mysterious" }
 local COUNTS = { 2, 3, 4, 5 }
 
+-- Chat capture: rolling buffer of recent IC speech / emotes for the scene box
+local chatLines = {}
+local MAX_CHAT_LINES = 12
+
 local function GetHandoff()
   return RPHelperHandoffData
 end
@@ -270,17 +274,25 @@ local function CreatePanel()
   end)
   f.countDd = countDd
 
-  -- Generate button
+  -- Button row: AI sheet draft + Write suggestions (right-anchored so it
+  -- can never overflow the panel edge)
+  local draftBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  draftBtn:SetSize(110, 24)
+  draftBtn:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -14)
+  draftBtn:SetText("AI sheet draft")
+  draftBtn:SetScript("OnClick", function() ns.RequestDraft() end)
+  f.draftBtn = draftBtn
+
   local generate = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  generate:SetSize(150, 26)
-  generate:SetPoint("LEFT", countDd, "RIGHT", 40, 0)
+  generate:SetSize(150, 24)
+  generate:SetPoint("RIGHT", draftBtn, "LEFT", -8, 0)
   generate:SetText("Write suggestions")
   generate:SetScript("OnClick", function() ns.RequestSuggestions() end)
   f.generateBtn = generate
 
-  -- Suggestions container
+  -- Suggestions container (below the button row)
   local container = CreateFrame("Frame", nil, f)
-  container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -56)
+  container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -54)
   container:SetPoint("BOTTOMRIGHT", -16, 40)
   f.rowsContainer = container
 
@@ -336,6 +348,97 @@ local function CapturePlayerInfo()
 end
 
 -- ---------------------------------------------------------------------------
+-- Chat capture (fills the scene box from real IC speech / emotes)
+-- ---------------------------------------------------------------------------
+local function IsSystemMessage(msg)
+  local m = strlower(msg)
+  local patterns = {
+    "has come online", "has gone offline", "is now the", "wins the achievement",
+    "has earned the achievement", "has gone from", "has joined the", "level up",
+    "has reached level", "wins!", "has won", "defeats", "has defeated",
+    "candidate", "votes needed", "queue for", "dungeon", "battleground",
+    "rated battleground", "arena team", "has gone up", "has gone down",
+    "has earned", "earned the title", "has been awarded", "has invited",
+    "declines", "goes on a", "receives item", "creates:", "loot:",
+    "has gone from level", "your group", "has joined a group", "leaves the group",
+    "has gone up to", "has gone down to", "wins the duel", "you won",
+  }
+  for _, p in ipairs(patterns) do
+    if strfind(m, p, 1, true) then return true end
+  end
+  return false
+end
+
+local function IsLfgNoise(msg)
+  local m = strlower(msg)
+  if strfind(m, "lfg", 1, true) or strfind(m, "lfm", 1, true) or strfind(m, "lf ", 1, true) then return true end
+  if strfind(m, "wts", 1, true) or strfind(m, "wtb", 1, true) or strfind(m, "wtt", 1, true) then return true end
+  if strfind(m, "+10", 1, true) or strfind(m, "+11", 1, true) or strfind(m, "+12", 1, true) then return true end
+  if strfind(m, "m+", 1, true) or strfind(m, "mythic", 1, true) then return true end
+  if strfind(m, "raid", 1, true) or strfind(m, "norm ", 1, true) or strfind(m, "heroic", 1, true) then return true end
+  if strfind(m, "guild", 1, true) or strfind(m, "recruit", 1, true) then return true end
+  if strfind(m, "boost", 1, true) or strfind(m, "carry", 1, true) then return true end
+  if strfind(m, "mount", 1, true) or strfind(m, "token", 1, true) then return true end
+  if strfind(m, "gold", 1, true) or strfind(m, "golds", 1, true) then return true end
+  if strfind(m, "inv ", 1, true) or strfind(m, "inv,", 1, true) then return true end
+  if strfind(m, "xmute", 1, true) or strfind(m, "enchant", 1, true) then return true end
+  if strfind(m, "crafted", 1, true) or strfind(m, "leggo", 1, true) then return true end
+  if strfind(m, "group for", 1, true) or strfind(m, "forming ", 1, true) then return true end
+  if strfind(m, "need 1", 1, true) or strfind(m, "need 2", 1, true) or strfind(m, "need 3", 1, true) then return true end
+  if strfind(m, "healer", 1, true) or strfind(m, "tank", 1, true) or strfind(m, "dps", 1, true) then return true end
+  if strfind(m, "pst", 1, true) or strfind(m, "whisper", 1, true) then return true end
+  if strfind(m, "anyone", 1, true) or strfind(m, "looking for", 1, true) then return true end
+  if strfind(m, "any takers", 1, true) or strfind(m, "spot open", 1, true) then return true end
+  if strfind(m, "selling", 1, true) or strfind(m, "buying", 1, true) then return true end
+  if strfind(m, "cheap", 1, true) or strfind(m, "discount", 1, true) then return true end
+  if strfind(m, "%d+/%d+") then return true end
+  if strfind(m, "raid tonight", 1, true) or strfind(m, "sign up", 1, true) then return true end
+  if strfind(m, "is looking for", 1, true) or strfind(m, "has come online", 1, true) then return true end
+  if strfind(m, "has gone offline", 1, true) or strfind(m, "is now the", 1, true) then return true end
+  if strfind(m, "wins the achievement", 1, true) or strfind(m, "has earned", 1, true) then return true end
+  if strfind(m, "has joined", 1, true) or strfind(m, "has left", 1, true) then return true end
+  if strfind(m, "goes on a", 1, true) or strfind(m, "has gone up", 1, true) then return true end
+  if strfind(m, "has gone down", 1, true) or strfind(m, "level up", 1, true) then return true end
+  if strfind(m, "has reached level", 1, true) or strfind(m, "wins!", 1, true) then return true end
+  if strfind(m, "has won", 1, true) or strfind(m, "defeats", 1, true) then return true end
+  if strfind(m, "has defeated", 1, true) or strfind(m, "candidate", 1, true) then return true end
+  if strfind(m, "votes needed", 1, true) or strfind(m, "queue for", 1, true) then return true end
+  if strfind(m, "dungeon", 1, true) or strfind(m, "battleground", 1, true) then return true end
+  if strfind(m, "arena", 1, true) or strfind(m, "rated", 1, true) then return true end
+  if strfind(m, "has been awarded", 1, true) or strfind(m, "has invited", 1, true) then return true end
+  if strfind(m, "declines", 1, true) or strfind(m, "receives item", 1, true) then return true end
+  if strfind(m, "creates:", 1, true) or strfind(m, "loot:", 1, true) then return true end
+  if strfind(m, "your group", 1, true) or strfind(m, "leaves the group", 1, true) then return true end
+  if strfind(m, "wins the duel", 1, true) or strfind(m, "you won", 1, true) then return true end
+  if strfind(m, "has come online", 1, true) or strfind(m, "has gone offline", 1, true) then return true end
+  return false
+end
+
+local function IsICLine(msg)
+  -- Emote-style RP: *nods slowly*, /me actions, or quoted speech
+  if strfind(msg, "*", 1, true) then return true end
+  if strfind(msg, '"', 1, true) then return true end
+  if strfind(msg, "'", 1, true) then return true end
+  return false
+end
+
+local function CaptureChatLine(msg)
+  if not msg or msg == "" then return end
+  if IsSystemMessage(msg) then return end
+  if IsLfgNoise(msg) then return end
+  if not IsICLine(msg) then return end
+  table.insert(chatLines, 1, strtrim(msg))
+  while #chatLines > MAX_CHAT_LINES do
+    table.remove(chatLines)
+  end
+  -- Live-update the scene box if the panel is open and the box is empty
+  if panel and panel.sceneBox and strtrim(panel.sceneBox:GetText() or "") == "" then
+    panel.sceneBox:SetText(table.concat(chatLines, "\n"))
+    if db then db.sceneDraft = panel.sceneBox:GetText() end
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- Request flow
 -- ---------------------------------------------------------------------------
 local function RequestId()
@@ -359,6 +462,7 @@ function ns.RequestSuggestions()
   db.quirks = strtrim(panel.quirksBox:GetText() or "")
   db.reqId = RequestId()
   db.reqStatus = "pending"
+  db.reqKind = "suggestions"
   db.reqAttempts = 0
   db.lastError = nil
   db.reqScene = scene
@@ -367,9 +471,34 @@ function ns.RequestSuggestions()
   db.reqPersonality = db.personality
   db.reqQuirks = db.quirks
   if panel and panel.statusFs then
-    panel.statusFs:SetText("Sending request… reloading UI, suggestions arrive in a moment.")
+    panel.statusFs:SetText("Sending request... reloading UI, suggestions arrive in a moment.")
   end
-  print("|cffffcc00RPHelper|r sending request — UI reloads automatically…")
+  print("|cffffcc00RPHelper|r sending request - UI reloads automatically...")
+  C_Timer.After(0.4, function()
+    ReloadUI()
+  end)
+end
+
+-- AI sheet draft: asks the companion to expand the personality notes into a
+-- polished personality + speech quirks draft (same reload handshake).
+function ns.RequestDraft()
+  if not db then return end
+  db.personality = strtrim(panel.personalityBox:GetText() or "")
+  db.quirks = strtrim(panel.quirksBox:GetText() or "")
+  db.reqId = RequestId()
+  db.reqStatus = "pending"
+  db.reqKind = "draft"
+  db.reqAttempts = 0
+  db.lastError = nil
+  db.reqScene = db.sceneDraft or ""
+  db.reqTone = db.tone or "Neutral"
+  db.reqCount = 1
+  db.reqPersonality = db.personality
+  db.reqQuirks = db.quirks
+  if panel and panel.statusFs then
+    panel.statusFs:SetText("Drafting sheet from your notes... reloading UI.")
+  end
+  print("|cffffcc00RPHelper|r drafting character sheet - UI reloads automatically...")
   C_Timer.After(0.4, function()
     ReloadUI()
   end)
@@ -408,6 +537,20 @@ local function CheckHandoff()
     db.lastError = handoff.error
     if handoff.error then
       print("|cffffcc00RPHelper|r AI error: " .. tostring(handoff.error))
+    elseif handoff.kind == "draft" then
+      -- Apply the drafted sheet straight into the panel + SavedVariables
+      if handoff.personality and handoff.personality ~= "" then
+        db.personality = handoff.personality
+        if panel then panel.personalityBox:SetText(handoff.personality) end
+      end
+      if handoff.quirks and handoff.quirks ~= "" then
+        db.quirks = handoff.quirks
+        if panel then panel.quirksBox:SetText(handoff.quirks) end
+      end
+      print("|cffffcc00RPHelper|r sheet draft ready - review it above.")
+      if panel and panel.statusFs then
+        panel.statusFs:SetText("Sheet draft applied - edit it, then Write suggestions.")
+      end
     else
       print("|cffffcc00RPHelper|r suggestions ready!")
     end
@@ -430,6 +573,11 @@ function ns.Refresh()
     panel:Show()
     return
   end
+  if handoff and handoff.kind == "draft" then
+    panel.statusFs:SetText("Sheet draft applied - edit it, then Write suggestions.")
+    panel:Show()
+    return
+  end
   if handoff and handoff.suggestions and #handoff.suggestions > 0 then
     panel.statusFs:SetText(("Updated %s  ·  tone: %s"):format(
       tostring(handoff.generatedAt or "?"):sub(1, 19),
@@ -437,7 +585,7 @@ function ns.Refresh()
     LayoutRows(handoff.suggestions)
     panel:Show()
   else
-    panel.statusFs:SetText("No suggestions yet — describe the scene and click Write suggestions.")
+    panel.statusFs:SetText("No suggestions yet - describe the scene and click Write suggestions.")
     panel:Show()
   end
 end
@@ -488,6 +636,10 @@ eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_LEVEL_UP")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("CHAT_MSG_SAY")
+eventFrame:RegisterEvent("CHAT_MSG_YELL")
+eventFrame:RegisterEvent("CHAT_MSG_EMOTE")
+eventFrame:RegisterEvent("CHAT_MSG_TEXT_EMOTE")
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
     RPHelperDB = RPHelperDB or { tone = "Neutral", count = 3 }
@@ -508,5 +660,8 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     CapturePlayerInfo()
   elseif event == "PLAYER_ENTERING_WORLD" then
     CapturePlayerInfo()
+  elseif event == "CHAT_MSG_SAY" or event == "CHAT_MSG_YELL"
+      or event == "CHAT_MSG_EMOTE" or event == "CHAT_MSG_TEXT_EMOTE" then
+    CaptureChatLine(arg1)
   end
 end)
