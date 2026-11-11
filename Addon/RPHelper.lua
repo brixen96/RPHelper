@@ -10,6 +10,10 @@
 ]]
 local ADDON_NAME, ns = ...
 
+-- Bump this on every release — shown in the panel title and on load so the
+-- player can confirm the installed version matches the repo.
+local VERSION = "0.2.0"
+
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
 -- modern APIs. Missing C_Timer silently killed the reload handshake:
@@ -215,10 +219,10 @@ local function CreatePanel()
   })
   f:SetFrameStrata("DIALOG")
 
-  -- Title bar
+  -- Title bar (version visible so the player can verify they're up to date)
   local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
   title:SetPoint("TOP", 0, -14)
-  title:SetText("RPHelper")
+  title:SetText("RPHelper v" .. VERSION)
 
   local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
   close:SetPoint("TOPRIGHT", -6, -6)
@@ -868,8 +872,10 @@ local function HandleSlash(msg)
     print("|cffffcc00RPHelper|r unknown tone. Options: " .. table.concat(TONES, ", "))
   elseif cmd == "chat" then
     ns.RefreshChat()
+  elseif cmd == "version" or cmd == "v" then
+    print(("|cffffcc00RPHelper|r version %s"):format(VERSION))
   elseif cmd == "help" then
-    print("|cffffcc00RPHelper|r commands:")
+    print(("|cffffcc00RPHelper|r v%s commands:"):format(VERSION))
     print("  /rph — toggle panel")
     print("  /rph chat — AI chat panel (letters, replies, etiquette)")
     print("  /rph set <scene> — describe scene and generate")
@@ -908,7 +914,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         ns.Refresh()
       end
     end
-    print("|cffffcc00RPHelper|r loaded — type |cffffcc00/rph|r for the panel, |cffffcc00/rph chat|r to talk to the AI.")
+    print(("|cffffcc00RPHelper|r v%s loaded — type |cffffcc00/rph|r for the panel, |cffffcc00/rph chat|r to talk to the AI."):format(VERSION))
   elseif event == "PLAYER_LOGIN" or event == "PLAYER_LEVEL_UP" then
     CapturePlayerInfo()
   elseif event == "PLAYER_ENTERING_WORLD" then
