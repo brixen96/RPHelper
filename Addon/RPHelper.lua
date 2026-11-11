@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.5"
+local VERSION = "0.2.6"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -117,6 +117,61 @@ local function LogEvent(msg)
   -- Mirror as one string: the watcher's parser flattens tables, so a plain
   -- string field is the reliable way for it to read the event log.
   db.eventsText = table.concat(db.events, "\n")
+end
+
+-- ---------------------------------------------------------------------------
+-- SafeReload — this client SILENTLY IGNORES ReloadUI() from timer contexts.
+-- Verified: "RELOAD firing" logged, no LOAD event, no SavedVariables write
+-- for 99s until the player manually /reloaded. So: try several mechanisms,
+-- and a watchdog escalates if the UI is still alive a few seconds later
+-- (a successful reload kills the old session, so the watchdog never fires).
+-- If everything fails we say so loudly instead of hanging on "Sending...".
+-- ---------------------------------------------------------------------------
+local RELOAD_MECHANISMS = {
+  { name = "C_UI.Reload", fn = function()
+      if C_UI and C_UI.Reload then C_UI.Reload() return true end
+      return false
+    end },
+  { name = "ConsoleExec", fn = function() ConsoleExec("reloadui") return true end },
+  { name = "ReloadUI", fn = function() ReloadUI() return true end },
+  { name = "SlashCmd", fn = function()
+      if SlashCmdList and SlashCmdList["RELOAD"] then SlashCmdList["RELOAD"]() return true end
+      return false
+    end },
+}
+local reloadIdx = 0
+local reloadChainActive = false
+
+local function SafeReload(reason)
+  if reloadChainActive then return end -- a chain is already escalating
+  reloadChainActive = true
+  local function attempt()
+    reloadIdx = reloadIdx + 1
+    local m = RELOAD_MECHANISMS[reloadIdx]
+    if not m then
+      reloadChainActive = false
+      reloadIdx = 0
+      LogEvent("RELOAD all mechanisms FAILED (" .. tostring(reason) .. ")")
+      print("|cffffcc00RPHelper|r auto-reload failed - type /reload manually, then send RPHelperLog.txt to the dev")
+      if panel and panel.statusFs then
+        panel.statusFs:SetText("Auto-reload failed - type /reload manually.")
+      end
+      return
+    end
+    local ok, called = pcall(m.fn)
+    LogEvent(("RELOAD try %d/%d %s ok=%s called=%s (%s)"):format(
+      reloadIdx, #RELOAD_MECHANISMS, m.name, tostring(ok), tostring(called), tostring(reason)))
+    if ok and called == false then
+      attempt() -- API missing on this client: escalate immediately
+      return
+    end
+    if db then db.reloadMechanism = reloadIdx end
+    -- Watchdog: still alive in 4s => that mechanism was silently ignored.
+    C_Timer.After(4, function()
+      attempt()
+    end)
+  end
+  attempt()
 end
 
 -- (BuildLogReport / ExportLog live after PlayerInfoText — Lua locals are
@@ -671,11 +726,8 @@ function ns.SendChat()
   ns.RefreshChat()
   panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
   LogEvent(("SEND chat id=%s len=%d"):format(reqId, #text))
-  C_Timer.After(0.4, function()
-    LogEvent("RELOAD firing (chat)")
-    ReloadUI()
-  end)
-  print("|cffffcc00RPHelper|r sending chat message - UI reloads automatically...")
+  print("|cffffcc00RPHelper|r sending chat message - reloading...")
+  SafeReload("send-chat")
 end
 
 -- Called on load: if the companion answered the pending chat message,
@@ -697,9 +749,9 @@ local function CheckChatReply()
       ChatAppend("a", tostring(handoff.chatReply or "(empty reply)"))
       print("|cffffcc00RPHelper|r chat reply received!")
     end
-    C_Timer.After(0.4, function()
-      ReloadUI()
-    end)
+    -- Show it NOW — no reload needed to display (history + pending clear
+    -- persist together atomically on the next reload/logout).
+    ns.Refresh()
     return true
   end
   -- Not answered yet: bounded wait-reload loop
@@ -720,9 +772,7 @@ local function CheckChatReply()
   LogEvent(("WAIT chat attempt=%d handoffKind=%s handoffId=%s"):format(
     attempts, tostring(handoff and handoff.kind), tostring(handoff and handoff.requestId)))
   panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, CHAT_MAX_ATTEMPTS))
-  C_Timer.After(WAIT_INTERVAL, function()
-    ReloadUI()
-  end)
+  SafeReload("wait-chat")
   return false
 end
 
@@ -887,11 +937,8 @@ function ns.RequestSuggestions()
   -- Schedule the reload FIRST — if anything below fails, the handshake
   -- must still happen (this ordering bug is why requests never sent)
   LogEvent(("SEND suggestions id=%s sceneLen=%d"):format(db.reqId, #scene))
-  C_Timer.After(0.4, function()
-    LogEvent("RELOAD firing (suggestions)")
-    ReloadUI()
-  end)
-  print("|cffffcc00RPHelper|r sending request - UI reloads automatically...")
+  print("|cffffcc00RPHelper|r sending request - reloading...")
+  SafeReload("send-suggestions")
 end
 
 -- AI sheet draft: asks the companion to expand the personality notes into a
@@ -915,11 +962,8 @@ function ns.RequestDraft()
     panel.statusFs:SetText("Drafting sheet from your notes... reloading UI.")
   end
   LogEvent("SEND draft id=" .. db.reqId)
-  C_Timer.After(0.4, function()
-    LogEvent("RELOAD firing (draft)")
-    ReloadUI()
-  end)
-  print("|cffffcc00RPHelper|r drafting character sheet - UI reloads automatically...")
+  print("|cffffcc00RPHelper|r drafting character sheet - reloading...")
+  SafeReload("send-draft")
 end
 
 -- The addon can only see the companion's answer after a UI reload (the
@@ -948,9 +992,7 @@ local function ScheduleAnswerWait()
   -- Keep the panel visible during the wait so the reloads are obvious
   ns.Refresh()
   panel.statusFs:SetText(("Waiting for AI... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
-  C_Timer.After(WAIT_INTERVAL, function()
-    ReloadUI()
-  end)
+  SafeReload("wait-main")
 end
 
 -- Called on load: if the companion answered our request, show it;
@@ -1097,6 +1139,11 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     local hc = GetChatHandoff()
     LogEvent(("LOAD chat-handoff kind=%s id=%s gen=%s"):format(
       tostring(hc and hc.kind), tostring(hc and hc.requestId), tostring(hc and hc.generatedAt)))
+    if db.reloadMechanism then
+      local rm = RELOAD_MECHANISMS[db.reloadMechanism]
+      LogEvent("RELOAD ok via " .. (rm and rm.name or tostring(db.reloadMechanism)))
+      db.reloadMechanism = nil
+    end
     if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()

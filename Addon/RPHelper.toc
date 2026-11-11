@@ -2,7 +2,7 @@
 ## Title: RPHelper
 ## Notes: Roleplay response co-pilot — pairs with the RPHelper companion app.
 ## Author: Emil & friends
-## Version: 0.2.5
+## Version: 0.2.6
 ## SavedVariables: RPHelperDB
 
 RPHelperHandoff.lua
