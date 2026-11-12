@@ -622,6 +622,54 @@ async function poll() {
 let lastExportedLog = '';
 let lastExportErr = null;
 
+// CVar flush probe: the addon sets `rphNonce` via SetCVar at every load.
+// Each NEW nonce value appearing in config-cache.wtf = a CVar flush event.
+// If flushes happen during play (not just at reload), v0.3.0 can send
+// requests over the CVar channel and kill the send-reload entirely.
+let lastCvarNonce = null;
+function checkCVarFlush() {
+  const wowRoot = deriveWowRoot(config);
+  if (!wowRoot) return;
+  const accountDir = path.join(wowRoot, 'WTF', 'Account');
+  let best = null;
+  const walk = (dir, depth) => {
+    if (depth > 5) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (e.name === 'config-cache.wtf') {
+        let mtime = 0;
+        try {
+          mtime = fs.statSync(full).mtimeMs;
+        } catch {
+          continue;
+        }
+        if (!best || mtime > best.mtime) best = { path: full, mtime };
+      }
+    }
+  };
+  walk(accountDir, 0);
+  if (!best) return;
+  try {
+    const text = fs.readFileSync(best.path, 'utf8');
+    const m = text.match(/SET rphNonce\s+"([^"]*)"/);
+    if (m && m[1] !== lastCvarNonce) {
+      const age = Math.round((Date.now() - best.mtime) / 1000);
+      logLine(`CVAR flush: rphNonce=${m[1]} (file age ${age}s) - correlate with LOAD times to judge mid-play flush`);
+      lastCvarNonce = m[1];
+    }
+  } catch {
+    /* unreadable - retry next tick */
+  }
+}
+
 function extractAddonEvents(raw) {
   const block = raw.match(/\["events"\]\s*=\s*\{([\s\S]*?)\}/);
   if (!block) return [];
@@ -717,6 +765,7 @@ server.listen(PORT, '127.0.0.1', () => {
 async function pollLoop() {
   try {
     exportAddonLog();
+    checkCVarFlush();
     await poll();
   } catch (e) {
     logLine(`poll error: ${e.stack || e.message}`);

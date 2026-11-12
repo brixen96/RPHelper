@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.8"
+local VERSION = "0.2.9"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -147,16 +147,17 @@ end
 
 -- ---------------------------------------------------------------------------
 -- SafeReload — reloads are the ONLY channel to the watcher (SavedVariables
--- hit disk on reload; addons have no file/network IO). This client:
---   • IGNORES reloads fired during the load sequence (ADDON_LOADED) —
---     verified: wait-chain try 1 fired at LOAD+0s, silently no-op'd;
---   • IGNORES legacy ReloadUI/ConsoleExec/SlashCmd from timer contexts;
---   • HONORS C_UI.Reload from click context (proven: send → LOAD 4s later).
--- Plan: C_UI.Reload immediately (click path), RETRY it from a timer (the
--- load-sequence path), then escalate through legacy mechanisms. A
--- generation counter supersedes stale chains so a new Send is never
--- swallowed by a dying chain (that bug stranded a message for 5 minutes).
+-- hit disk on reload; addons have no file/network IO). Measured on this
+-- client (v0.2.9 logs): reloads FAIL for ~40-50s after every load — every
+-- attempt <37s after load failed, every attempt >=49s succeeded — an
+-- anti-reload-loop cooldown, regardless of mechanism. So: try the chain
+-- now; if it exhausts INSIDE the cooldown, wait it out and retry once.
+-- Click/input context works once the cooldown expires; the Check button is
+-- the guaranteed manual path. A generation counter supersedes stale chains
+-- so a new Send is never swallowed by a dying chain.
 -- ---------------------------------------------------------------------------
+local RELOAD_COOLDOWN = 50 -- seconds after load before reloads are honored
+
 local RELOAD_PLAN = {
   { name = "C_UI.Reload", wait = 3, fn = function()
       if C_UI and C_UI.Reload then C_UI.Reload() return true end
@@ -175,10 +176,30 @@ local RELOAD_PLAN = {
 }
 local reloadGen = 0
 
-local function SafeReload(reason)
+local function SafeReload(reason, fromClick, isRetry)
   reloadGen = reloadGen + 1
   local gen = reloadGen
   local step = 0
+  local function sinceLoad()
+    if db and db.loadedAt then return time() - db.loadedAt end
+    return 999
+  end
+
+  -- Non-click origins inside the cooldown are futile (measured) — skip the
+  -- chain and wait it out in one shot.
+  if not fromClick and not isRetry and sinceLoad() < RELOAD_COOLDOWN then
+    local wait = RELOAD_COOLDOWN - sinceLoad() + 2
+    LogEvent(("RELOAD deferred %ds (cooldown, sinceLoad=%ds) (%s)"):format(wait, sinceLoad(), reason))
+    if panel and panel.statusFs then
+      panel.statusFs:SetText(("Waiting out client reload cooldown (~%ds)..."):format(wait))
+    end
+    AfterDelay(wait, function()
+      if gen ~= reloadGen then return end -- superseded meanwhile
+      SafeReload(reason .. "@cooldown", false, true)
+    end)
+    return
+  end
+
   local function attempt()
     if gen ~= reloadGen then
       LogEvent("RELOAD superseded by newer request (" .. tostring(reason) .. ")")
@@ -187,17 +208,31 @@ local function SafeReload(reason)
     step = step + 1
     local m = RELOAD_PLAN[step]
     if not m then
+      -- Chain exhausted: if we were inside the cooldown, wait it out and
+      -- retry once (this is what makes sends work right after a reload).
+      if not isRetry and sinceLoad() < RELOAD_COOLDOWN then
+        local wait = RELOAD_COOLDOWN - sinceLoad() + 2
+        LogEvent(("RELOAD chain failed inside cooldown (sinceLoad=%ds) - deferring %ds (%s)"):format(sinceLoad(), wait, reason))
+        if panel and panel.statusFs then
+          panel.statusFs:SetText(("Reload blocked by client cooldown - retrying in ~%ds..."):format(wait))
+        end
+        AfterDelay(wait, function()
+          if gen ~= reloadGen then return end
+          SafeReload(reason .. "@cooldown", false, true)
+        end)
+        return
+      end
       if db then db.reloadMechanism = nil end -- don't claim a mechanism "ok" on failure
-      LogEvent("RELOAD all mechanisms FAILED (" .. tostring(reason) .. ")")
-      print("|cffffcc00RPHelper|r auto-reload failed - type /reload manually, then send RPHelperLog.txt to the dev")
+      LogEvent(("RELOAD all mechanisms FAILED sinceLoad=%ds (%s)"):format(sinceLoad(), reason))
+      print("|cffffcc00RPHelper|r auto-reload failed - click the Check button or type /reload, then send RPHelperLog.txt to the dev")
       if panel and panel.statusFs then
-        panel.statusFs:SetText("Auto-reload failed - type /reload manually.")
+        panel.statusFs:SetText("Auto-reload failed - click Check or type /reload.")
       end
       return
     end
     local ok, called = pcall(m.fn)
-    LogEvent(("RELOAD try %d/%d %s ok=%s called=%s (%s)"):format(
-      step, #RELOAD_PLAN, m.name, tostring(ok), tostring(called), tostring(reason)))
+    LogEvent(("RELOAD try %d/%d %s ok=%s called=%s sinceLoad=%ds (%s)"):format(
+      step, #RELOAD_PLAN, m.name, tostring(ok), tostring(called), sinceLoad(), tostring(reason)))
     if ok and called == false then
       attempt() -- API missing on this client: escalate immediately
       return
@@ -724,6 +759,18 @@ local function CreatePanel()
   copyBtn:SetScript("OnClick", function() ns.ExportLog() end)
   f.copyBtn = copyBtn
 
+  -- Check: guaranteed click-context reload (works once the client's reload
+  -- cooldown has expired) — the manual floor when auto-reload can't fire.
+  local checkBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  checkBtn:SetSize(70, 24)
+  checkBtn:SetPoint("RIGHT", copyBtn, "LEFT", -8, 0)
+  checkBtn:SetText("Check")
+  checkBtn:SetScript("OnClick", function()
+    if panel and panel.statusFs then panel.statusFs:SetText("Checking for a reply...") end
+    SafeReload("check-click", true)
+  end)
+  f.checkBtn = checkBtn
+
   -- Footer hint (short — sits left of the Send/Clear buttons)
   local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   hint:SetPoint("BOTTOMLEFT", 16, 20)
@@ -829,7 +876,7 @@ function ns.SendChat()
     LogEvent(("SEND chat id=%s len=%d"):format(reqId, #text))
     panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
     print("|cffffcc00RPHelper|r sending chat message - reloading...")
-    SafeReload("send-chat") -- click-synchronous: proven to work
+    SafeReload("send-chat", true) -- click origin: try now, defer if in cooldown
   end
 end
 
@@ -875,7 +922,7 @@ local function CheckChatReply()
   LogEvent(("WAIT chat attempt=%d handoffKind=%s handoffId=%s"):format(
     attempts, tostring(handoff and handoff.kind), tostring(handoff and handoff.requestId)))
   panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, CHAT_MAX_ATTEMPTS))
-  SafeReloadLater(WAIT_INTERVAL, "wait-chat") -- timer context, NOT load context
+  SafeReload("wait-chat") -- cooldown-aware: defers out of the load window
   return false
 end
 
@@ -1047,7 +1094,7 @@ function ns.RequestSuggestions()
   else
     LogEvent(("SEND suggestions id=%s sceneLen=%d"):format(db.reqId, #scene))
     print("|cffffcc00RPHelper|r sending request - reloading...")
-    SafeReload("send-suggestions") -- click-synchronous: proven to work
+    SafeReload("send-suggestions", true) -- click origin: try now, defer if in cooldown
   end
 end
 
@@ -1078,7 +1125,7 @@ function ns.RequestDraft()
   else
     LogEvent("SEND draft id=" .. db.reqId)
     print("|cffffcc00RPHelper|r drafting character sheet - reloading...")
-    SafeReload("send-draft") -- click-synchronous: proven to work
+    SafeReload("send-draft", true) -- click origin: try now, defer if in cooldown
   end
 end
 
@@ -1108,7 +1155,7 @@ local function ScheduleAnswerWait()
   -- Keep the panel visible during the wait so the reloads are obvious
   ns.Refresh()
   panel.statusFs:SetText(("Waiting for AI... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
-  SafeReloadLater(WAIT_INTERVAL, "wait-main") -- timer context, NOT load context
+  SafeReload("wait-main") -- cooldown-aware: defers out of the load window
 end
 
 -- Called on load: if the companion answered our request, show it;
@@ -1203,6 +1250,9 @@ local function HandleSlash(msg)
       end
     end
     print("|cffffcc00RPHelper|r unknown tone. Options: " .. table.concat(TONES, ", "))
+  elseif cmd == "check" then
+    if panel and panel.statusFs then panel.statusFs:SetText("Checking for a reply...") end
+    SafeReload("check-slash", true)
   elseif cmd == "chat" then
     ns.RefreshChat()
   elseif cmd == "version" or cmd == "v" then
@@ -1218,6 +1268,7 @@ local function HandleSlash(msg)
     print("  /rph set <scene> — describe scene and generate")
     print("  /rph tone <name> — " .. table.concat(TONES, ", "))
     print("  /rph reload — refresh panel from last answer")
+    print("  /rph check — reload now to fetch a pending reply")
     print("  /rph log — show diagnostics (select + Ctrl+C)")
     print("  /rph show — reopen the log box")
   else
@@ -1242,6 +1293,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
     RPHelperDB = RPHelperDB or { tone = "Neutral", count = 3 }
     db = RPHelperDB
+    db.loadedAt = time() -- reload cooldown clock (SafeReload gates on this)
     math.random(time())
     SLASH_RPHELPER1 = "/rph"
     SlashCmdList.RPHELPER = HandleSlash
@@ -1261,6 +1313,31 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
       db.reloadMechanism = nil
     end
     ProbeSaveApi() -- SaveAddOnVariables => no-reload sends (io is unavailable)
+    -- CVar channel probe: set rphNonce NOW and every 30s DURING play. If a
+    -- new value shows up in config-cache.wtf without a reload in between,
+    -- CVars flush mid-play => sends can skip the reload entirely (v0.3.0).
+    local function setNonce()
+      pcall(function()
+        local nonce = tostring(time())
+        if C_CVar and C_CVar.SetCVar then
+          C_CVar.SetCVar("rphNonce", nonce)
+        elseif SetCVar then
+          SetCVar("rphNonce", nonce)
+        else
+          error("SetCVar not available")
+        end
+      end)
+    end
+    local ok, err = pcall(setNonce)
+    LogEvent("CVAR probe: " .. (ok and "SetCVar ok - nonce ticking every 30s, watcher watches config-cache" or ("no - " .. tostring(err))))
+    if ok then
+      local tick
+      tick = function()
+        setNonce()
+        AfterDelay(30, tick)
+      end
+      AfterDelay(30, tick)
+    end
     if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()
