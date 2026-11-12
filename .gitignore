@@ -11,3 +11,5 @@ RPHelperLog.txt
 *.log
 .DS_Store
 chat-history.json
+sheet.json
+suggestions.json
