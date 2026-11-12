@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.3.0"
+local VERSION = "0.3.1"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -119,30 +119,15 @@ local function LogEvent(msg)
   db.eventsText = table.concat(db.events, "\n")
 end
 
--- Prefer the CLIENT's C_Timer for scheduling reloads: our shim fires from
--- raw OnUpdate context, which this client silently ignores for reloads
--- (proven: shim-timer chains never produced a LOAD). Click-synchronous
--- reloads work; client-timer context is the remaining candidate.
+-- Prefer the SHIM timer (OnUpdate frame handler): frame handlers are the
+-- same class as OnClick — and click reloads work 100% on this client,
+-- while client-C_Timer reloads failed 100% (v0.3.0 evidence: every
+-- timer chain failed, every Check click reloaded). Historical shim
+-- failures were all inside the load/cooldown window, never cleanly
+-- tested. Client C_Timer also appears to SWALLOW deliberate errors
+-- (the 14:01:31 send never reached General.log).
 local function AfterDelay(delay, fn)
-  local g = _G.C_Timer
-  if g and g.After then
-    g.After(delay, fn)
-  else
-    C_Timer.After(delay, fn) -- our shim (local)
-  end
-end
-
--- Prefer the CLIENT's C_Timer for scheduling reloads: our shim fires from
--- raw OnUpdate context, which this client silently ignores for reloads
--- (proven: shim-timer chains never produced a LOAD). Click-synchronous
--- reloads work; client-timer context is the remaining candidate.
-local function AfterDelay(delay, fn)
-  local g = _G.C_Timer
-  if g and g.After then
-    g.After(delay, fn)
-  else
-    C_Timer.After(delay, fn) -- our shim (local)
-  end
+  C_Timer.After(delay, fn) -- our shim (OnUpdate frame handler)
 end
 
 -- ---------------------------------------------------------------------------
@@ -158,21 +143,20 @@ end
 -- ---------------------------------------------------------------------------
 local RELOAD_COOLDOWN = 50 -- seconds after load before reloads are honored
 
+-- ONLY non-restricted mechanisms: ConsoleExec and SlashCmd were dropped
+-- (v0.3.1) — ConsoleExec is restricted for addons and SlashCmd routes
+-- through protected slash handling; both produced the "Interface action
+-- failed because of an AddOn" taint errors the player kept seeing.
 local RELOAD_PLAN = {
   { name = "C_UI.Reload", wait = 3, fn = function()
       if C_UI and C_UI.Reload then C_UI.Reload() return true end
       return false
     end },
-  { name = "C_UI.Reload(timer)", wait = 4, fn = function()
+  { name = "C_UI.Reload(retry)", wait = 4, fn = function()
       if C_UI and C_UI.Reload then C_UI.Reload() return true end
       return false
     end },
-  { name = "ConsoleExec", wait = 4, fn = function() ConsoleExec("reloadui") return true end },
   { name = "ReloadUI", wait = 4, fn = function() ReloadUI() return true end },
-  { name = "SlashCmd", wait = 4, fn = function()
-      if SlashCmdList and SlashCmdList["RELOAD"] then SlashCmdList["RELOAD"]() return true end
-      return false
-    end },
 }
 local reloadGen = 0
 
@@ -247,17 +231,11 @@ end
 -- Schedule a reload from timer context (used by wait loops and the
 -- post-send safety reload). Logs which timer fired for diagnostics.
 local function SafeReloadLater(delay, reason)
-  local g = _G.C_Timer
-  local label = g and g.After and "client-timer" or "shim-timer"
   local function fire()
-    LogEvent("RELOAD scheduled fired via " .. label .. " (" .. tostring(reason) .. ")")
+    LogEvent("RELOAD scheduled fired via shim-timer (" .. tostring(reason) .. ")")
     SafeReload(reason)
   end
-  if g and g.After then
-    g.After(delay, fire)
-  else
-    C_Timer.After(delay, fire)
-  end
+  C_Timer.After(delay, fire) -- shim: OnUpdate frame handler (click-class context)
 end
 
 -- SaveAddOnVariables (if this client has it) flushes SavedVariables to disk
@@ -902,7 +880,7 @@ function ns.SendChat()
     -- reload. The +10s reload persists SavedVariables (fallback) and picks
     -- up the reply (handoff files are only readable at load time).
     LogEvent(("SEND chat id=%s len=%d error-channel"):format(reqId, #text))
-    panel.statusFs:SetText("Sending... no reload now - reply in a few seconds.")
+    panel.statusFs:SetText("Sending... if no reply in ~15s, click Check.")
     print("|cffffcc00RPHelper|r sending chat message (no reload)...")
     EmitLater({ kind = "chat", id = reqId, text = text })
     SafeReloadLater(10, "post-send-chat")
@@ -1128,7 +1106,7 @@ function ns.RequestSuggestions()
     SafeReloadLater(5, "post-send-suggestions")
   else
     LogEvent(("SEND suggestions id=%s sceneLen=%d error-channel"):format(db.reqId, #scene))
-    panel.statusFs:SetText("Sending... no reload now - suggestions in a few seconds.")
+    panel.statusFs:SetText("Sending... if no reply in ~15s, click Check.")
     print("|cffffcc00RPHelper|r sending request (no reload)...")
     EmitLater({
       kind = "suggestions", id = db.reqId, scene = scene,
@@ -1362,14 +1340,18 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     ProbeSaveApi() -- SaveAddOnVariables => no-reload sends (io is unavailable)
     -- Hide deliberate error-channel popups (the RPHelperREQ emits). Real
     -- addon errors are still caught by our pcall wrappers + event log.
-    pcall(function()
-      if C_CVar and C_CVar.SetCVar then
-        C_CVar.SetCVar("scriptErrors", "0")
-      elseif SetCVar then
-        SetCVar("scriptErrors", "0")
-      end
-    end)
-    LogEvent("scriptErrors CVar set to 0 (hide error-channel popups)")
+    -- Log the TRUE SetCVar result — v0.3.0 logged success unconditionally.
+    do
+      local ok, setOk = pcall(function()
+        if C_CVar and C_CVar.SetCVar then
+          return C_CVar.SetCVar("scriptErrors", "0")
+        elseif SetCVar then
+          return SetCVar("scriptErrors", "0")
+        end
+        return "no SetCVar API"
+      end)
+      LogEvent("scriptErrors=0 -> " .. (ok and tostring(setOk) or ("pcall err: " .. tostring(setOk))))
+    end
     -- CVar channel probe: set rphNonce NOW and every 30s DURING play. If a
     -- new value shows up in config-cache.wtf without a reload in between,
     -- CVars flush mid-play => sends can skip the reload entirely (v0.3.0).
