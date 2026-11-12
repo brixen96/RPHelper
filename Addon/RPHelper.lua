@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.7"
+local VERSION = "0.2.8"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -119,6 +119,19 @@ local function LogEvent(msg)
   db.eventsText = table.concat(db.events, "\n")
 end
 
+-- Prefer the CLIENT's C_Timer for scheduling reloads: our shim fires from
+-- raw OnUpdate context, which this client silently ignores for reloads
+-- (proven: shim-timer chains never produced a LOAD). Click-synchronous
+-- reloads work; client-timer context is the remaining candidate.
+local function AfterDelay(delay, fn)
+  local g = _G.C_Timer
+  if g and g.After then
+    g.After(delay, fn)
+  else
+    C_Timer.After(delay, fn) -- our shim (local)
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- SafeReload — reloads are the ONLY channel to the watcher (SavedVariables
 -- hit disk on reload; addons have no file/network IO). This client:
@@ -178,9 +191,61 @@ local function SafeReload(reason)
     end
     if db then db.reloadMechanism = step end
     -- Watchdog: still alive after m.wait => that attempt was silently ignored.
-    C_Timer.After(m.wait, attempt)
+    AfterDelay(m.wait, attempt)
   end
   attempt()
+end
+
+-- Schedule a reload from timer context (used by wait loops and the
+-- post-send safety reload). Logs which timer fired for diagnostics.
+local function SafeReloadLater(delay, reason)
+  local g = _G.C_Timer
+  local label = g and g.After and "client-timer" or "shim-timer"
+  local function fire()
+    LogEvent("RELOAD scheduled fired via " .. label .. " (" .. tostring(reason) .. ")")
+    SafeReload(reason)
+  end
+  if g and g.After then
+    g.After(delay, fire)
+  else
+    C_Timer.After(delay, fire)
+  end
+end
+
+-- SaveAddOnVariables (if this client has it) flushes SavedVariables to disk
+-- WITHOUT a reload — the watcher reads that file directly, so sends need no
+-- reload at all. Probe result cached in db.saveApiWorks; falls back to the
+-- proven click-sync reload path when unavailable.
+local function TrySaveNow()
+  if not db or not db.saveApiWorks then return false end
+  local ok = pcall(function()
+    if SaveAddOnVariables then
+      SaveAddOnVariables(ADDON_NAME)
+    elseif C_AddOns and C_AddOns.SaveAddOnVariables then
+      C_AddOns.SaveAddOnVariables(ADDON_NAME)
+    else
+      error("SaveAddOnVariables vanished")
+    end
+  end)
+  if not ok then
+    db.saveApiWorks = false
+    LogEvent("SAVE now failed - falling back to reload path")
+  end
+  return ok
+end
+
+local function ProbeSaveApi()
+  local ok, err = pcall(function()
+    if SaveAddOnVariables then
+      SaveAddOnVariables(ADDON_NAME)
+    elseif C_AddOns and C_AddOns.SaveAddOnVariables then
+      C_AddOns.SaveAddOnVariables(ADDON_NAME)
+    else
+      error("SaveAddOnVariables not available")
+    end
+  end)
+  db.saveApiWorks = ok
+  LogEvent("SAVE probe: " .. (ok and "SaveAddOnVariables WORKS (no-reload sends enabled)" or ("no - " .. tostring(err))))
 end
 
 -- (BuildLogReport / ExportLog live after PlayerInfoText — Lua locals are
@@ -302,9 +367,10 @@ local function BuildLogReport()
   lines[#lines + 1] = "C_Timer shim: own OnUpdate queue (client has no C_Timer)"
   lines[#lines + 1] = ""
   lines[#lines + 1] = "-- request state --"
-  lines[#lines + 1] = ("reqStatus=%s reqKind=%s reqId=%s attempts=%s"):format(
+  lines[#lines + 1] = ("reqStatus=%s reqKind=%s reqId=%s attempts=%s saveApi=%s"):format(
     tostring(db and db.reqStatus), tostring(db and db.reqKind),
-    tostring(db and db.reqId), tostring(db and db.reqAttempts))
+    tostring(db and db.reqId), tostring(db and db.reqAttempts),
+    tostring(db and db.saveApiWorks))
   local cp = db and db.chatPending
   lines[#lines + 1] = ("chatPending id=%s attempts=%s text=%s"):format(
     tostring(cp and cp.id), tostring(cp and cp.attempts),
@@ -710,6 +776,12 @@ function ns.RefreshChat()
     lines[1] = "|cff9d9d9dNo conversation yet. Ask about a letter, a reply, or RP etiquette.|r"
   end
   panel.chatHistoryBox:SetText(table.concat(lines, "\n\n"))
+  -- Newest message visible from the start: multiline EditBoxes auto-grow to
+  -- content height inside a ScrollFrame, so range = content - viewport.
+  local range = panel.chatHistoryBox:GetHeight() - panel.chatScroll:GetHeight()
+  if range > 0 then
+    panel.chatScroll:SetVerticalScroll(range)
+  end
   panel:Show()
 end
 
@@ -733,10 +805,19 @@ function ns.SendChat()
   db.lastError = nil
   panel.chatInput:SetText("")
   ns.RefreshChat()
-  panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
-  LogEvent(("SEND chat id=%s len=%d"):format(reqId, #text))
-  print("|cffffcc00RPHelper|r sending chat message - reloading...")
-  SafeReload("send-chat")
+  if TrySaveNow() then
+    -- Request already on disk: NO reload at click. One delayed reload picks
+    -- up the reply (the handoff file is only readable at load time).
+    LogEvent(("SEND chat id=%s len=%d saved-no-reload"):format(reqId, #text))
+    panel.statusFs:SetText("Sending... reply arrives in a few seconds (one reload, not now).")
+    print("|cffffcc00RPHelper|r sending chat message (no reload)...")
+    SafeReloadLater(5, "post-send-chat")
+  else
+    LogEvent(("SEND chat id=%s len=%d"):format(reqId, #text))
+    panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
+    print("|cffffcc00RPHelper|r sending chat message - reloading...")
+    SafeReload("send-chat") -- click-synchronous: proven to work
+  end
 end
 
 -- Called on load: if the companion answered the pending chat message,
@@ -781,7 +862,7 @@ local function CheckChatReply()
   LogEvent(("WAIT chat attempt=%d handoffKind=%s handoffId=%s"):format(
     attempts, tostring(handoff and handoff.kind), tostring(handoff and handoff.requestId)))
   panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, CHAT_MAX_ATTEMPTS))
-  SafeReload("wait-chat")
+  SafeReloadLater(WAIT_INTERVAL, "wait-chat") -- timer context, NOT load context
   return false
 end
 
@@ -945,9 +1026,16 @@ function ns.RequestSuggestions()
   end
   -- Schedule the reload FIRST — if anything below fails, the handshake
   -- must still happen (this ordering bug is why requests never sent)
-  LogEvent(("SEND suggestions id=%s sceneLen=%d"):format(db.reqId, #scene))
-  print("|cffffcc00RPHelper|r sending request - reloading...")
-  SafeReload("send-suggestions")
+  if TrySaveNow() then
+    LogEvent(("SEND suggestions id=%s sceneLen=%d saved-no-reload"):format(db.reqId, #scene))
+    panel.statusFs:SetText("Sending... suggestions arrive in a few seconds (one reload, not now).")
+    print("|cffffcc00RPHelper|r sending request (no reload)...")
+    SafeReloadLater(5, "post-send-suggestions")
+  else
+    LogEvent(("SEND suggestions id=%s sceneLen=%d"):format(db.reqId, #scene))
+    print("|cffffcc00RPHelper|r sending request - reloading...")
+    SafeReload("send-suggestions") -- click-synchronous: proven to work
+  end
 end
 
 -- AI sheet draft: asks the companion to expand the personality notes into a
@@ -970,9 +1058,15 @@ function ns.RequestDraft()
   if panel and panel.statusFs then
     panel.statusFs:SetText("Drafting sheet from your notes... reloading UI.")
   end
-  LogEvent("SEND draft id=" .. db.reqId)
-  print("|cffffcc00RPHelper|r drafting character sheet - reloading...")
-  SafeReload("send-draft")
+  if TrySaveNow() then
+    LogEvent("SEND draft id=" .. db.reqId .. " saved-no-reload")
+    print("|cffffcc00RPHelper|r drafting character sheet (no reload)...")
+    SafeReloadLater(5, "post-send-draft")
+  else
+    LogEvent("SEND draft id=" .. db.reqId)
+    print("|cffffcc00RPHelper|r drafting character sheet - reloading...")
+    SafeReload("send-draft") -- click-synchronous: proven to work
+  end
 end
 
 -- The addon can only see the companion's answer after a UI reload (the
@@ -1001,7 +1095,7 @@ local function ScheduleAnswerWait()
   -- Keep the panel visible during the wait so the reloads are obvious
   ns.Refresh()
   panel.statusFs:SetText(("Waiting for AI... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
-  SafeReload("wait-main")
+  SafeReloadLater(WAIT_INTERVAL, "wait-main") -- timer context, NOT load context
 end
 
 -- Called on load: if the companion answered our request, show it;
@@ -1153,18 +1247,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
       LogEvent("RELOAD ok via " .. (rm and rm.name or tostring(db.reloadMechanism)))
       db.reloadMechanism = nil
     end
-    -- Probe file IO once per session: if the addon CAN write files we can
-    -- drop the whole reload handshake entirely in a future version.
-    do
-      local ok, err = pcall(function()
-        if not io or not io.open then error("io library unavailable") end
-        local f = io.open("Interface\\AddOns\\RPHelper\\RPHelperProbe.txt", "w")
-        if not f then error("io.open returned nil") end
-        f:write("probe v" .. VERSION)
-        f:close()
-      end)
-      LogEvent("IO probe: " .. (ok and "WRITABLE" or ("no - " .. tostring(err))))
-    end
+    ProbeSaveApi() -- SaveAddOnVariables => no-reload sends (io is unavailable)
     if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()
