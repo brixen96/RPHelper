@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RPHelper — AI RP Companion</title>
+  <title>Munkeklubben — RPHelper</title>
   <style>
     :root {
       --gold: #c8a24a;
@@ -16,6 +16,7 @@
       --user: #7fd17f;
       --ai: #e0c060;
       --danger: #d05050;
+      --live: #6fbf73;
     }
     * { box-sizing: border-box; }
     body {
@@ -30,7 +31,7 @@
     }
     header {
       width: 100%;
-      max-width: 900px;
+      max-width: 1040px;
       padding: 18px 20px 10px;
       display: flex;
       align-items: baseline;
@@ -38,28 +39,22 @@
       gap: 12px;
       flex-wrap: wrap;
     }
-    h1 {
-      margin: 0;
-      color: var(--gold);
-      font-weight: normal;
-      letter-spacing: 3px;
-      font-size: 22px;
-    }
+    h1 { margin: 0; color: var(--gold); font-weight: normal; letter-spacing: 3px; font-size: 24px; }
     h1 small { color: var(--text-dim); letter-spacing: 1px; font-size: 12px; }
     #status { font-size: 12px; color: var(--text-dim); }
-    #status .ok { color: #6fbf73; }
+    #status .ok { color: var(--live); }
     #status .bad { color: var(--danger); }
 
     .layout {
       width: 100%;
-      max-width: 900px;
+      max-width: 1040px;
       display: grid;
-      grid-template-columns: 1fr 280px;
+      grid-template-columns: 1fr 320px;
       gap: 14px;
       padding: 0 20px 20px;
       flex: 1;
     }
-    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+    @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
 
     .panel {
       background: var(--panel);
@@ -79,87 +74,82 @@
     }
 
     /* Chat */
-    #chatPanel { min-height: 480px; }
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      max-height: 60vh;
-      padding-right: 6px;
-      scroll-behavior: smooth;
-    }
+    #chatPanel { min-height: 520px; }
+    #messages { flex: 1; overflow-y: auto; max-height: 58vh; padding-right: 6px; scroll-behavior: smooth; }
     .msg { margin-bottom: 12px; line-height: 1.45; }
     .msg .who { font-size: 12px; letter-spacing: 1px; }
     .msg.user .who { color: var(--user); }
     .msg.ai .who { color: var(--ai); }
     .msg .body { white-space: pre-wrap; word-break: break-word; }
     .msg.user .body { color: #cfe8cf; }
-    .msg.ai .body { color: var(--text); }
     .msg.pending .body { color: var(--text-dim); font-style: italic; }
     .msg.error .body { color: var(--danger); }
     .empty { color: var(--text-dim); font-style: italic; }
 
     #composer { display: flex; gap: 8px; margin-top: 12px; }
     #input {
-      flex: 1;
-      background: #0d0a07;
-      border: 1px solid var(--panel-edge);
-      border-radius: 4px;
-      color: var(--text);
-      padding: 10px 12px;
-      font-size: 14px;
-      font-family: inherit;
-      resize: none;
-      min-height: 44px;
-      max-height: 140px;
+      flex: 1; background: #0d0a07; border: 1px solid var(--panel-edge); border-radius: 4px;
+      color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit;
+      resize: none; min-height: 44px; max-height: 140px;
     }
     #input:focus { outline: none; border-color: var(--gold-dim); }
     button {
-      background: linear-gradient(#5a2020, #3a1414);
-      border: 1px solid #7a3030;
-      color: #e8b060;
-      border-radius: 4px;
-      padding: 0 18px;
-      font-size: 14px;
-      cursor: pointer;
-      letter-spacing: 1px;
+      background: linear-gradient(#5a2020, #3a1414); border: 1px solid #7a3030; color: #e8b060;
+      border-radius: 4px; padding: 0 18px; font-size: 14px; cursor: pointer; letter-spacing: 1px;
     }
     button:hover { filter: brightness(1.2); }
     button:disabled { opacity: 0.5; cursor: default; }
 
-    /* Sidebar */
     .card { margin-bottom: 14px; }
-    .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
-    .kv .k { color: var(--text-dim); }
+    .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; gap: 8px; }
+    .kv .k { color: var(--text-dim); white-space: nowrap; }
     .kv .v { color: var(--text); text-align: right; }
-    #charName { color: var(--gold); font-size: 15px; margin-bottom: 6px; }
+    .kv .v .live-dot { color: var(--live); }
+    #charName { color: var(--gold); font-size: 16px; margin-bottom: 2px; }
+    #charSub { color: var(--text-dim); font-size: 12px; margin-bottom: 8px; }
+
+    .member {
+      background: #0d0a07; border: 1px solid var(--panel-edge); border-radius: 4px;
+      padding: 8px 10px; margin-bottom: 8px; font-size: 13px; line-height: 1.4; position: relative;
+    }
+    .member.me { border-color: var(--gold-dim); }
+    .member .num { color: var(--gold-dim); margin-right: 6px; }
+    .member .sub { color: var(--text-dim); font-size: 12px; }
+    .member .zone { color: var(--live); font-size: 11px; }
+    .member .pers { color: var(--text-dim); font-size: 12px; margin-top: 4px; font-style: italic; }
+    .member .del {
+      position: absolute; right: 8px; top: 6px; color: var(--text-dim); font-size: 12px;
+      cursor: pointer; opacity: 0.5;
+    }
+    .member .del:hover { color: var(--danger); opacity: 1; }
 
     .suggestion {
-      background: #0d0a07;
-      border: 1px solid var(--panel-edge);
-      border-radius: 4px;
-      padding: 8px 10px;
-      margin-bottom: 8px;
-      font-size: 13px;
-      line-height: 1.4;
-      cursor: pointer;
-      position: relative;
+      background: #0d0a07; border: 1px solid var(--panel-edge); border-radius: 4px;
+      padding: 8px 10px; margin-bottom: 8px; font-size: 13px; line-height: 1.4;
+      cursor: pointer; position: relative;
     }
     .suggestion:hover { border-color: var(--gold-dim); }
     .suggestion .num { color: var(--gold-dim); margin-right: 6px; }
     .suggestion .copied {
-      position: absolute; right: 8px; top: 6px;
-      color: var(--user); font-size: 11px; opacity: 0;
-      transition: opacity 0.2s;
+      position: absolute; right: 8px; top: 6px; color: var(--user); font-size: 11px;
+      opacity: 0; transition: opacity 0.2s;
     }
     .suggestion.copied .copied { opacity: 1; }
     .dim { color: var(--text-dim); font-size: 12px; font-style: italic; }
+    .row { display: flex; gap: 6px; }
+    .row input { flex: 1; }
+    input.fld {
+      background: #0d0a07; border: 1px solid var(--panel-edge); border-radius: 4px;
+      color: var(--text); padding: 6px 8px; font-size: 13px; font-family: inherit;
+    }
+    input.fld:focus { outline: none; border-color: var(--gold-dim); }
     footer { text-align: center; color: var(--text-dim); font-size: 11px; padding: 8px; }
     footer code { background: #2a231a; padding: 1px 6px; border-radius: 4px; color: var(--gold); }
   </style>
 </head>
 <body>
   <header>
-    <h1>⚔️ RPHelper <small id="ver"></small></h1>
+    <h1>🏰 <span id="title">Munkeklubben</span> <small>· RPHelper</small></h1>
     <div id="status">connecting…</div>
   </header>
 
@@ -175,28 +165,31 @@
 
     <aside>
       <section class="panel card">
-        <h2>Character</h2>
+        <h2>Your character <span class="dim" id="liveTag"></span></h2>
         <div id="charName">—</div>
-        <div class="kv"><span class="k">Race / Class</span><span class="v" id="cRace">—</span></div>
+        <div id="charSub">—</div>
         <div class="kv"><span class="k">Level</span><span class="v" id="cLevel">—</span></div>
         <div class="kv"><span class="k">Spec</span><span class="v" id="cSpec">—</span></div>
-        <div class="kv"><span class="k">Realm</span><span class="v" id="cRealm">—</span></div>
+        <div class="kv"><span class="k">Item level</span><span class="v" id="cIlvl">—</span></div>
+        <div class="kv"><span class="k">Health</span><span class="v" id="cHp">—</span></div>
+        <div class="kv"><span class="k">Zone</span><span class="v" id="cZone">—</span></div>
+        <div class="kv"><span class="k">Money</span><span class="v" id="cMoney">—</span></div>
+        <div class="kv"><span class="k">Last seen</span><span class="v" id="cSeen">—</span></div>
       </section>
 
       <section class="panel card">
         <h2>Guild roster <span id="guildCount" class="dim"></span></h2>
-        <div id="guildNameRow" style="display:none; margin-bottom:8px;">
-          <input id="guildName" placeholder="Guild name…" style="width:100%; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
+        <div class="row" style="margin-bottom:8px;">
+          <input id="guildName" class="fld" placeholder="Guild name…" style="flex:1" />
         </div>
-        <div id="guildList"><div class="dim">No roster yet — add members below, or let each guildie's addon sync their sheet.</div></div>
-        <div id="guildForm" style="display:none; margin-top:8px;">
-          <input id="gName" placeholder="Name (required)" style="width:100%; margin-bottom:4px; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
-          <input id="gRace" placeholder="Race / Class (e.g. Troll Mage)" style="width:100%; margin-bottom:4px; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
-          <input id="gPers" placeholder="Personality (optional)" style="width:100%; margin-bottom:4px; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
-          <div style="display:flex; gap:6px;">
-            <button id="gAdd" style="flex:1; padding:6px; font-size:13px;">Add</button>
-            <button id="gToggle" class="ghost" style="padding:6px 10px; font-size:13px; background:#241c12; border-color:var(--panel-edge); color:var(--text-dim);">+</button>
-          </div>
+        <div id="guildList"><div class="dim">Loading roster…</div></div>
+        <div class="row" style="margin-top:6px;">
+          <input id="gName" class="fld" placeholder="Name (required)" />
+          <input id="gRace" class="fld" placeholder="Race / Class" />
+        </div>
+        <div class="row" style="margin-top:4px;">
+          <input id="gPers" class="fld" placeholder="Personality (optional)" style="flex:1" />
+          <button id="gAdd" style="padding:0 12px;">Add</button>
         </div>
         <div class="dim" id="guildStatus" style="margin-top:6px"></div>
       </section>
@@ -217,16 +210,32 @@
     </aside>
   </div>
 
-  <footer>Open this page while playing · in-game panel: <code>/rph</code> · click a suggestion to copy it</footer>
+  <footer>Open this page while playing · in-game panel: <code>/rph</code> · roster synced via MongoDB Atlas</footer>
 
   <script>
     const $ = (id) => document.getElementById(id);
     let busy = false;
 
+    const ENT = { '&': '&#38;', '<': '&#60;', '>': '&#62;', '"': '&#34;' };
     function esc(s) {
-      return String(s).replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>');
+      return String(s ?? '').replace(/[&<>"]/g, (ch) => ENT[ch]);
     }
 
+    function fmtMoney(copper) {
+      if (copper == null) return '—';
+      const g = Math.floor(copper / 10000);
+      const s = Math.floor((copper % 10000) / 100);
+      const c = copper % 100;
+      const parts = [];
+      if (g) parts.push(g + 'g');
+      if (s) parts.push(s + 's');
+      if (c || parts.length === 0) parts.push(c + 'c');
+      return parts.join(' ');
+    }
+
+    function fmtNum(n) { return n == null ? '—' : String(n); }
+
+    /* ---- Chat ---- */
     function renderMessages(history) {
       const box = $('messages');
       if (!history || history.length === 0) {
@@ -287,30 +296,29 @@
       }
     }
 
-    function renderSuggestions(list, meta) {
-      const box = $('suggestions');
-      if (!list || list.length === 0) {
-        box.innerHTML = '<div class="dim">Write suggestions in game (/rph) — they appear here.</div>';
-        $('sugMeta').textContent = '';
+    /* ---- Character (live from game) ---- */
+    function renderCharacter(c, guildName) {
+      if (!c || !c.name) {
+        $('charName').textContent = '—';
+        $('charSub').textContent = 'waiting for the game… (/reload in game once)';
         return;
       }
-      box.innerHTML = list.map((s, i) =>
-        `<div class="suggestion" data-text="${esc(s).replace(/"/g, '"')}"><span class="num">${i + 1}.</span>${esc(s)}<span class="copied">copied ✓</span></div>`
-      ).join('');
-      $('sugMeta').textContent = meta || '';
-      box.querySelectorAll('.suggestion').forEach((el) => {
-        el.addEventListener('click', async () => {
-          try {
-            await navigator.clipboard.writeText(el.dataset.text);
-            el.classList.add('copied');
-            setTimeout(() => el.classList.remove('copied'), 1200);
-          } catch { /* clipboard denied */ }
-        });
-      });
+      $('charName').textContent = c.name;
+      $('charSub').textContent = [c.race, c.class].filter(Boolean).join(' ') + (guildName ? ' · ' + guildName : '');
+      $('cLevel').textContent = fmtNum(c.level);
+      $('cSpec').textContent = c.spec || '—';
+      $('cIlvl').textContent = c.itemLevel != null ? c.itemLevel : '—';
+      $('cHp').textContent = c.hpMax ? `${c.hp}/${c.hpMax}` : '—';
+      $('cZone').textContent = c.zone || '—';
+      $('cMoney').textContent = fmtMoney(c.money);
+      $('cSeen').innerHTML = c.updatedAt
+        ? `<span class="live-dot">●</span> ${esc(c.updatedAt)}`
+        : '—';
+      $('liveTag').textContent = c.zone ? '· live' : '';
     }
 
-    /* ---- Guild roster (MongoDB Atlas via watcher) ---- */
-    function renderGuild(guild, enabled, guildName) {
+    /* ---- Guild roster ---- */
+    function renderGuild(guild, enabled, guildName, meName) {
       const list = $('guildList');
       const status = $('guildStatus');
       if (!enabled) {
@@ -318,9 +326,10 @@
         status.textContent = '';
         return;
       }
-      $('guildNameRow').style.display = '';
-      $('guildName').value = guildName || '';
-      $('guildForm').style.display = '';
+      // Don't clobber the input while the user is typing a guild name
+      if (document.activeElement !== $('guildName')) {
+        $('guildName').value = guildName || '';
+      }
       const members = (guild && guild.members) || [];
       $('guildCount').textContent = members.length ? `(${members.length})` : '';
       if (members.length === 0) {
@@ -329,10 +338,16 @@
         list.innerHTML = members.map((m) => {
           const who = [m.race, m.class].filter(Boolean).join(' ') || '';
           const lvl = m.level ? ` · lvl ${m.level}` : '';
-          const pers = m.personality ? `<div class="dim" style="margin-top:3px">${esc(m.personality)}</div>` : '';
-          return `<div class="suggestion" style="cursor:default" data-name="${esc(m.name)}">
-            <span class="num">⚜</span><b>${esc(m.name)}</b> <span class="dim">${esc(who)}${esc(lvl)}</span>${pers}
-            <span class="copied" style="opacity:0.6; cursor:pointer" data-del="1">✕</span>
+          const spec = m.spec ? ` · ${m.spec}` : '';
+          const ilvl = m.itemLevel ? ` · iLvl ${m.itemLevel}` : '';
+          const zone = m.zone ? `<div class="zone">📍 ${esc(m.zone)}</div>` : '';
+          const pers = m.personality ? `<div class="pers">${esc(m.personality)}</div>` : '';
+          const isMe = meName && m.name === meName;
+          return `<div class="member${isMe ? ' me' : ''}" data-name="${esc(m.name)}">
+            <span class="num">⚜</span><b>${esc(m.name)}</b>
+            <span class="sub">${esc(who)}${esc(lvl)}${esc(spec)}${esc(ilvl)}</span>
+            ${zone}${pers}
+            <span class="del" data-del="1" title="Remove">✕</span>
           </div>`;
         }).join('');
         list.querySelectorAll('[data-del]').forEach((el) => {
@@ -342,7 +357,7 @@
             if (!confirm(`Remove ${name} from the roster?`)) return;
             const r = await fetch('/api/guild/members?name=' + encodeURIComponent(name), { method: 'DELETE' });
             const d = await r.json();
-            if (d.ok) renderGuild(d.guild, true, guildName);
+            if (d.ok) renderGuild(d.guild, true, guildName, meName);
           });
         });
       }
@@ -371,7 +386,7 @@
         const d = await r.json();
         if (d.ok) {
           $('gName').value = ''; $('gRace').value = ''; $('gPers').value = '';
-          renderGuild(d.guild, true, $('guildName').value);
+          renderGuild(d.guild, true, $('guildName').value, $('charName').textContent);
         } else {
           $('guildStatus').textContent = '⚠ ' + (d.error || 'failed');
         }
@@ -385,6 +400,7 @@
     async function saveGuildName() {
       const name = $('guildName').value.trim();
       if (!name) return;
+      $('title').textContent = name;
       try {
         await fetch('/api/guild', {
           method: 'POST',
@@ -394,6 +410,30 @@
       } catch { /* shown on next poll */ }
     }
 
+    /* ---- Suggestions ---- */
+    function renderSuggestions(list, meta) {
+      const box = $('suggestions');
+      if (!list || list.length === 0) {
+        box.innerHTML = '<div class="dim">Write suggestions in game (/rph) — they appear here.</div>';
+        $('sugMeta').textContent = '';
+        return;
+      }
+      box.innerHTML = list.map((s, i) =>
+        `<div class="suggestion" data-text="${esc(s).replace(/"/g, '"')}"><span class="num">${i + 1}.</span>${esc(s)}<span class="copied">copied ✓</span></div>`
+      ).join('');
+      $('sugMeta').textContent = meta || '';
+      box.querySelectorAll('.suggestion').forEach((el) => {
+        el.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(el.dataset.text);
+            el.classList.add('copied');
+            setTimeout(() => el.classList.remove('copied'), 1200);
+          } catch { /* clipboard denied */ }
+        });
+      });
+    }
+
+    /* ---- State poll ---- */
     async function pollState() {
       try {
         const res = await fetch('/api/state');
@@ -402,14 +442,9 @@
         const st = s.status;
         $('status').innerHTML =
           `<span class="${st.hasApiKey ? 'ok' : 'bad'}">● watcher</span> · ${st.model || '?'} · ${st.requestsServed} served`;
-        const c = s.character;
-        if (c && c.name) {
-          $('charName').textContent = c.name + (c.realm ? ' — ' + c.realm : '');
-          $('cRace').textContent = [c.race, c.class].filter(Boolean).join(' ') || '—';
-          $('cLevel').textContent = c.level || '—';
-          $('cSpec').textContent = c.spec || '—';
-          $('cRealm').textContent = c.realm || '—';
-        }
+        if (s.guildName) $('title').textContent = s.guildName;
+        renderCharacter(s.character, s.guildName);
+        renderGuild(s.guild, s.guildEnabled, s.guildName, s.character && s.character.name);
         $('wModel').textContent = st.model || '—';
         $('wServed').textContent = st.requestsServed;
         $('wUptime').textContent = Math.round(st.uptimeSec / 60) + 'm';
@@ -418,7 +453,6 @@
           : '<span class="bad">waiting for /reload</span>';
         renderSuggestions(s.suggestions,
           s.suggestionsAt ? 'from game · ' + String(s.suggestionsAt).slice(11, 19) + ' UTC · tone: ' + (s.suggestionsTone || '-') : '');
-        renderGuild(s.guild, s.guildEnabled, s.guildName);
         if (!busy) renderMessages(s.chat);
       } catch {
         $('status').innerHTML = '<span class="bad">● watcher not reachable</span>';
@@ -431,14 +465,6 @@
     });
     $('gAdd').addEventListener('click', addGuildMember);
     $('gName').addEventListener('keydown', (e) => { if (e.key === 'Enter') addGuildMember(); });
-    $('gToggle').addEventListener('click', () => {
-      const f = $('guildForm');
-      const hidden = f.dataset.open !== '1';
-      f.dataset.open = hidden ? '1' : '0';
-      f.querySelectorAll('input').forEach((i) => { i.style.display = hidden ? '' : 'none'; });
-      $('gToggle').textContent = hidden ? '−' : '+';
-      if (hidden) $('gName').focus();
-    });
     let nameTimer = null;
     $('guildName').addEventListener('input', () => {
       clearTimeout(nameTimer);

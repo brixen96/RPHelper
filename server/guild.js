@@ -97,6 +97,48 @@ export async function upsertMember(config, member) {
   }
 }
 
+/** Merge live data into an existing member (preserves personality/quirks/
+ * note — heartbeats only refresh the live fields). Returns roster or null. */
+export async function mergeMember(config, live) {
+  if (!live || !live.name) return null;
+  const db = await ensureDb(config);
+  if (!db) return null;
+  try {
+    const col = db.collection('guild');
+    const doc = await col.findOne({ _id: GUILD_ID });
+    const members = (doc && Array.isArray(doc.members) ? doc.members : []);
+    const idx = members.findIndex((m) => String(m.name).toLowerCase() === String(live.name).toLowerCase());
+    const base = idx >= 0 ? members[idx] : { name: String(live.name) };
+    const merged = {
+      ...base,
+      name: String(live.name),
+      race: live.race || base.race || '',
+      class: live.class || base.class || '',
+      level: live.level ?? base.level ?? null,
+      spec: live.spec || base.spec || '',
+      zone: live.zone || '',
+      money: live.money ?? null,
+      itemLevel: live.itemLevel ?? null,
+      hp: live.hp ?? null,
+      hpMax: live.hpMax ?? null,
+      realm: live.realm || base.realm || '',
+      updatedBy: 'heartbeat',
+      updatedAt: new Date().toISOString(),
+    };
+    if (idx >= 0) members[idx] = merged;
+    else members.push(merged);
+    await col.updateOne(
+      { _id: GUILD_ID },
+      { $set: { members, updatedAt: new Date().toISOString() } },
+      { upsert: true }
+    );
+    return { name: (doc && doc.name) || config?.guild?.name || 'Guild', members };
+  } catch (err) {
+    console.error(`[guild] merge failed: ${err.message}`);
+    return null;
+  }
+}
+
 /** Remove a member by name. Returns roster or null. */
 export async function removeMember(config, name) {
   const db = await ensureDb(config);

@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.3.2"
+local VERSION = "0.3.3"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -771,9 +771,54 @@ local function CapturePlayerInfo()
     level = UnitLevel("player"),
     spec = specName,
     sex = sexCode == 3 and "Female" or (sexCode == 2 and "Male" or nil),
+    guild = GetGuildInfo and GetGuildInfo("player") or nil,
+    zone = GetZoneText and GetZoneText() or nil,
+    money = GetMoney and GetMoney() or nil,
+    itemLevel = (function()
+      if not GetAverageItemLevel then return nil end
+      local ok, _, overall = pcall(GetAverageItemLevel)
+      if ok and overall and tonumber(overall) then return math.floor(tonumber(overall) * 10) / 10 end
+      return nil
+    end)(),
+    hp = UnitHealth and UnitHealth("player") or nil,
+    hpMax = UnitHealthMax and UnitHealthMax("player") or nil,
     updatedAt = date("%Y-%m-%d %H:%M"),
   }
   UpdateCharInfo()
+end
+
+-- ---------------------------------------------------------------------------
+-- Heartbeat: push the live player snapshot to the watcher every 2 minutes via
+-- the error channel (popups suppressed with scriptErrors=0). Keeps the guild
+-- website's character card fresh with zero reloads.
+-- ---------------------------------------------------------------------------
+local function PlayerJson()
+  local p = db and db.player
+  if not p then return "{}" end
+  local function q(s)
+    return '"' .. tostring(s or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n") .. '"'
+  end
+  local parts = {}
+  for _, k in ipairs({ "name", "realm", "race", "class", "level", "spec", "guild", "zone", "money", "itemLevel", "hp", "hpMax", "updatedAt" }) do
+    local v = p[k]
+    if v ~= nil then
+      parts[#parts + 1] = '"' .. k .. '":' .. (type(v) == "number" and tostring(v) or q(v))
+    end
+  end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local hbGen = 0
+local function EmitHeartbeat()
+  hbGen = hbGen + 1
+  EmitRequest({ kind = "heartbeat", id = "hb-" .. time() .. "-" .. hbGen, data = PlayerJson() })
+end
+
+local function ScheduleHeartbeat(delay)
+  AfterDelay(delay, function()
+    ScheduleHeartbeat(120) -- re-arm FIRST: EmitHeartbeat throws (by design)
+    EmitHeartbeat()
+  end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -1180,6 +1225,10 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
       end
       AfterDelay(30, tick)
     end
+    -- Live data heartbeat: push the player snapshot to the watcher every 2
+    -- minutes (error channel, popups suppressed) so the guild website stays
+    -- fresh without any reloads.
+    ScheduleHeartbeat(10)
     if not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()

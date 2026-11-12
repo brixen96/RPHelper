@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findSavedVariablesFile, parseSavedVariables, deriveWowRoot, unescapeLuaString } from './player.js';
-import { guildEnabled, getGuild, upsertMember, removeMember, setGuildName, guildPromptBlock } from './guild.js';
+import { guildEnabled, getGuild, upsertMember, removeMember, setGuildName, mergeMember, guildPromptBlock } from './guild.js';
 
 /** Repo root: module dir (dev) → exe dir (packaged) → cwd. */
 function detectRoot() {
@@ -513,6 +513,13 @@ async function handleState(res) {
       class: svData.class || null,
       level: svData.level || null,
       spec: svData.spec || null,
+      guild: svData.guild || null,
+      zone: svData.zone || null,
+      money: svData.money ?? null,
+      itemLevel: svData.itemLevel ?? null,
+      hp: svData.hp ?? null,
+      hpMax: svData.hpMax ?? null,
+      updatedAt: svData.updatedAt || null,
     },
     scene: svData.sceneDraft || '',
     personality: svData.personality || '',
@@ -670,6 +677,7 @@ let errLogOffset = _state.errLogOffset ?? null; // General.log tail position (nu
 // "unprocessed" and re-fired, wasting an AI call.
 let processedIds = new Set((_state.processedIds || []).map(String));
 let lastSheetSig = _state.lastSheetSig ?? null; // guild sheet auto-push dedupe
+let lastHeartbeatId = _state.lastHeartbeatId ?? null; // live snapshot dedupe
 if (lastChatId) processedIds.add(String(lastChatId));
 if (lastMainId) processedIds.add(String(lastMainId));
 function markProcessed(id) {
@@ -936,6 +944,24 @@ function tailGeneralLog() {
     }
     const id = obj.id ? String(obj.id) : null;
     if (!id) continue;
+    // Heartbeats are live player snapshots — merge into the roster, never
+    // queue them as AI requests.
+    if (obj.kind === 'heartbeat') {
+      if (id === lastHeartbeatId) continue;
+      lastHeartbeatId = id;
+      try {
+        const data = JSON.parse(obj.data || '{}');
+        if (data.name && guildEnabled(config)) {
+          mergeMember(config, data).then((g) => {
+            if (g) logLine(`heartbeat: ${data.name} @ ${data.zone || '?'} (roster ${g.members.length})`);
+          });
+        }
+      } catch (err) {
+        logLine(`heartbeat parse failed: ${err.message}`);
+      }
+      saveState({ lastMainId, lastChatId, errLogOffset, processedIds: [...processedIds], lastSheetSig, lastHeartbeatId });
+      continue;
+    }
     if (processedIds.has(id)) continue;
     if (pendingErrReqs.some((p) => String(p.id) === id)) continue;
     pendingErrReqs.push(obj);
