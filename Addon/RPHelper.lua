@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.6"
+local VERSION = "0.2.7"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -120,37 +120,48 @@ local function LogEvent(msg)
 end
 
 -- ---------------------------------------------------------------------------
--- SafeReload — this client SILENTLY IGNORES ReloadUI() from timer contexts.
--- Verified: "RELOAD firing" logged, no LOAD event, no SavedVariables write
--- for 99s until the player manually /reloaded. So: try several mechanisms,
--- and a watchdog escalates if the UI is still alive a few seconds later
--- (a successful reload kills the old session, so the watchdog never fires).
--- If everything fails we say so loudly instead of hanging on "Sending...".
+-- SafeReload — reloads are the ONLY channel to the watcher (SavedVariables
+-- hit disk on reload; addons have no file/network IO). This client:
+--   • IGNORES reloads fired during the load sequence (ADDON_LOADED) —
+--     verified: wait-chain try 1 fired at LOAD+0s, silently no-op'd;
+--   • IGNORES legacy ReloadUI/ConsoleExec/SlashCmd from timer contexts;
+--   • HONORS C_UI.Reload from click context (proven: send → LOAD 4s later).
+-- Plan: C_UI.Reload immediately (click path), RETRY it from a timer (the
+-- load-sequence path), then escalate through legacy mechanisms. A
+-- generation counter supersedes stale chains so a new Send is never
+-- swallowed by a dying chain (that bug stranded a message for 5 minutes).
 -- ---------------------------------------------------------------------------
-local RELOAD_MECHANISMS = {
-  { name = "C_UI.Reload", fn = function()
+local RELOAD_PLAN = {
+  { name = "C_UI.Reload", wait = 3, fn = function()
       if C_UI and C_UI.Reload then C_UI.Reload() return true end
       return false
     end },
-  { name = "ConsoleExec", fn = function() ConsoleExec("reloadui") return true end },
-  { name = "ReloadUI", fn = function() ReloadUI() return true end },
-  { name = "SlashCmd", fn = function()
+  { name = "C_UI.Reload(timer)", wait = 4, fn = function()
+      if C_UI and C_UI.Reload then C_UI.Reload() return true end
+      return false
+    end },
+  { name = "ConsoleExec", wait = 4, fn = function() ConsoleExec("reloadui") return true end },
+  { name = "ReloadUI", wait = 4, fn = function() ReloadUI() return true end },
+  { name = "SlashCmd", wait = 4, fn = function()
       if SlashCmdList and SlashCmdList["RELOAD"] then SlashCmdList["RELOAD"]() return true end
       return false
     end },
 }
-local reloadIdx = 0
-local reloadChainActive = false
+local reloadGen = 0
 
 local function SafeReload(reason)
-  if reloadChainActive then return end -- a chain is already escalating
-  reloadChainActive = true
+  reloadGen = reloadGen + 1
+  local gen = reloadGen
+  local step = 0
   local function attempt()
-    reloadIdx = reloadIdx + 1
-    local m = RELOAD_MECHANISMS[reloadIdx]
+    if gen ~= reloadGen then
+      LogEvent("RELOAD superseded by newer request (" .. tostring(reason) .. ")")
+      return
+    end
+    step = step + 1
+    local m = RELOAD_PLAN[step]
     if not m then
-      reloadChainActive = false
-      reloadIdx = 0
+      if db then db.reloadMechanism = nil end -- don't claim a mechanism "ok" on failure
       LogEvent("RELOAD all mechanisms FAILED (" .. tostring(reason) .. ")")
       print("|cffffcc00RPHelper|r auto-reload failed - type /reload manually, then send RPHelperLog.txt to the dev")
       if panel and panel.statusFs then
@@ -160,16 +171,14 @@ local function SafeReload(reason)
     end
     local ok, called = pcall(m.fn)
     LogEvent(("RELOAD try %d/%d %s ok=%s called=%s (%s)"):format(
-      reloadIdx, #RELOAD_MECHANISMS, m.name, tostring(ok), tostring(called), tostring(reason)))
+      step, #RELOAD_PLAN, m.name, tostring(ok), tostring(called), tostring(reason)))
     if ok and called == false then
       attempt() -- API missing on this client: escalate immediately
       return
     end
-    if db then db.reloadMechanism = reloadIdx end
-    -- Watchdog: still alive in 4s => that mechanism was silently ignored.
-    C_Timer.After(4, function()
-      attempt()
-    end)
+    if db then db.reloadMechanism = step end
+    -- Watchdog: still alive after m.wait => that attempt was silently ignored.
+    C_Timer.After(m.wait, attempt)
   end
   attempt()
 end
@@ -1140,9 +1149,21 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     LogEvent(("LOAD chat-handoff kind=%s id=%s gen=%s"):format(
       tostring(hc and hc.kind), tostring(hc and hc.requestId), tostring(hc and hc.generatedAt)))
     if db.reloadMechanism then
-      local rm = RELOAD_MECHANISMS[db.reloadMechanism]
+      local rm = RELOAD_PLAN[db.reloadMechanism]
       LogEvent("RELOAD ok via " .. (rm and rm.name or tostring(db.reloadMechanism)))
       db.reloadMechanism = nil
+    end
+    -- Probe file IO once per session: if the addon CAN write files we can
+    -- drop the whole reload handshake entirely in a future version.
+    do
+      local ok, err = pcall(function()
+        if not io or not io.open then error("io library unavailable") end
+        local f = io.open("Interface\\AddOns\\RPHelper\\RPHelperProbe.txt", "w")
+        if not f then error("io.open returned nil") end
+        f:write("probe v" .. VERSION)
+        f:close()
+      end)
+      LogEvent("IO probe: " .. (ok and "WRITABLE" or ("no - " .. tostring(err))))
     end
     if not CheckChatReply() and not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
