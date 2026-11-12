@@ -184,6 +184,24 @@
       </section>
 
       <section class="panel card">
+        <h2>Guild roster <span id="guildCount" class="dim"></span></h2>
+        <div id="guildNameRow" style="display:none; margin-bottom:8px;">
+          <input id="guildName" placeholder="Guild name…" style="width:100%; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
+        </div>
+        <div id="guildList"><div class="dim">No roster yet — add members below, or let each guildie's addon sync their sheet.</div></div>
+        <div id="guildForm" style="display:none; margin-top:8px;">
+          <input id="gName" placeholder="Name (required)" style="width:100%; margin-bottom:4px; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
+          <input id="gRace" placeholder="Race / Class (e.g. Troll Mage)" style="width:100%; margin-bottom:4px; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
+          <input id="gPers" placeholder="Personality (optional)" style="width:100%; margin-bottom:4px; background:#0d0a07; border:1px solid var(--panel-edge); border-radius:4px; color:var(--text); padding:6px 8px; font-size:13px;" />
+          <div style="display:flex; gap:6px;">
+            <button id="gAdd" style="flex:1; padding:6px; font-size:13px;">Add</button>
+            <button id="gToggle" class="ghost" style="padding:6px 10px; font-size:13px; background:#241c12; border-color:var(--panel-edge); color:var(--text-dim);">+</button>
+          </div>
+        </div>
+        <div class="dim" id="guildStatus" style="margin-top:6px"></div>
+      </section>
+
+      <section class="panel card">
         <h2>In-game suggestions</h2>
         <div id="suggestions"><div class="dim">Write suggestions in game (/rph) — they appear here.</div></div>
         <div class="dim" id="sugMeta" style="margin-top:6px"></div>
@@ -291,6 +309,91 @@
       });
     }
 
+    /* ---- Guild roster (MongoDB Atlas via watcher) ---- */
+    function renderGuild(guild, enabled, guildName) {
+      const list = $('guildList');
+      const status = $('guildStatus');
+      if (!enabled) {
+        list.innerHTML = '<div class="dim">MongoDB not configured — add config.mongodb.uri.</div>';
+        status.textContent = '';
+        return;
+      }
+      $('guildNameRow').style.display = '';
+      $('guildName').value = guildName || '';
+      $('guildForm').style.display = '';
+      const members = (guild && guild.members) || [];
+      $('guildCount').textContent = members.length ? `(${members.length})` : '';
+      if (members.length === 0) {
+        list.innerHTML = '<div class="dim">No members yet — add them below.</div>';
+      } else {
+        list.innerHTML = members.map((m) => {
+          const who = [m.race, m.class].filter(Boolean).join(' ') || '';
+          const lvl = m.level ? ` · lvl ${m.level}` : '';
+          const pers = m.personality ? `<div class="dim" style="margin-top:3px">${esc(m.personality)}</div>` : '';
+          return `<div class="suggestion" style="cursor:default" data-name="${esc(m.name)}">
+            <span class="num">⚜</span><b>${esc(m.name)}</b> <span class="dim">${esc(who)}${esc(lvl)}</span>${pers}
+            <span class="copied" style="opacity:0.6; cursor:pointer" data-del="1">✕</span>
+          </div>`;
+        }).join('');
+        list.querySelectorAll('[data-del]').forEach((el) => {
+          el.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const name = el.closest('[data-name]').dataset.name;
+            if (!confirm(`Remove ${name} from the roster?`)) return;
+            const r = await fetch('/api/guild/members?name=' + encodeURIComponent(name), { method: 'DELETE' });
+            const d = await r.json();
+            if (d.ok) renderGuild(d.guild, true, guildName);
+          });
+        });
+      }
+      status.textContent = 'synced via MongoDB Atlas — every guildie\'s watcher shares this roster';
+    }
+
+    async function addGuildMember() {
+      const name = $('gName').value.trim();
+      if (!name) { $('gName').focus(); return; }
+      const raceClass = $('gRace').value.trim();
+      const [race, ...cls] = raceClass.split(/\s+/);
+      const member = {
+        name,
+        race: race || '',
+        class: cls.join(' ') || '',
+        personality: $('gPers').value.trim(),
+        updatedBy: 'browser',
+      };
+      $('gAdd').disabled = true;
+      try {
+        const r = await fetch('/api/guild/members', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(member),
+        });
+        const d = await r.json();
+        if (d.ok) {
+          $('gName').value = ''; $('gRace').value = ''; $('gPers').value = '';
+          renderGuild(d.guild, true, $('guildName').value);
+        } else {
+          $('guildStatus').textContent = '⚠ ' + (d.error || 'failed');
+        }
+      } catch (err) {
+        $('guildStatus').textContent = '⚠ ' + err.message;
+      } finally {
+        $('gAdd').disabled = false;
+      }
+    }
+
+    async function saveGuildName() {
+      const name = $('guildName').value.trim();
+      if (!name) return;
+      try {
+        await fetch('/api/guild', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch { /* shown on next poll */ }
+    }
+
     async function pollState() {
       try {
         const res = await fetch('/api/state');
@@ -315,6 +418,7 @@
           : '<span class="bad">waiting for /reload</span>';
         renderSuggestions(s.suggestions,
           s.suggestionsAt ? 'from game · ' + String(s.suggestionsAt).slice(11, 19) + ' UTC · tone: ' + (s.suggestionsTone || '-') : '');
+        renderGuild(s.guild, s.guildEnabled, s.guildName);
         if (!busy) renderMessages(s.chat);
       } catch {
         $('status').innerHTML = '<span class="bad">● watcher not reachable</span>';
@@ -324,6 +428,21 @@
     $('send').addEventListener('click', send);
     $('input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    $('gAdd').addEventListener('click', addGuildMember);
+    $('gName').addEventListener('keydown', (e) => { if (e.key === 'Enter') addGuildMember(); });
+    $('gToggle').addEventListener('click', () => {
+      const f = $('guildForm');
+      const hidden = f.dataset.open !== '1';
+      f.dataset.open = hidden ? '1' : '0';
+      f.querySelectorAll('input').forEach((i) => { i.style.display = hidden ? '' : 'none'; });
+      $('gToggle').textContent = hidden ? '−' : '+';
+      if (hidden) $('gName').focus();
+    });
+    let nameTimer = null;
+    $('guildName').addEventListener('input', () => {
+      clearTimeout(nameTimer);
+      nameTimer = setTimeout(saveGuildName, 800);
     });
     pollState();
     setInterval(pollState, 3000);

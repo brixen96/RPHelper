@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findSavedVariablesFile, parseSavedVariables, deriveWowRoot, unescapeLuaString } from './player.js';
+import { guildEnabled, getGuild, upsertMember, removeMember, setGuildName, guildPromptBlock } from './guild.js';
 
 /** Repo root: module dir (dev) → exe dir (packaged) → cwd. */
 function detectRoot() {
@@ -236,6 +237,7 @@ async function generateWithAI(payload) {
 
   const character = payload.character || {};
   const scene = payload.scene || {};
+  const guildBlock = guildPromptBlock(await getGuild(config));
   const userMsg = [
     `CHARACTER SHEET`,
     `Name: ${character.name || 'unknown'}`,
@@ -243,6 +245,7 @@ async function generateWithAI(payload) {
     `Personality: ${character.personality || 'friendly newcomer'}`,
     `Speech quirks: ${character.quirks || 'none'}`,
     ``,
+    guildBlock,
     `SCENE`,
     `Setting: ${scene.setting || 'a tavern'}`,
     `Talking to: ${scene.withWhom || 'another player'}`,
@@ -273,10 +276,12 @@ async function generateDraftWithAI(payload) {
   const or = config.openrouter || {};
   if (!or.apiKey) return null;
   const character = payload.character || {};
+  const guildBlock = guildPromptBlock(await getGuild(config));
   const userMsg = [
     `RACE/CLASS: ${character.raceClass || 'unknown'}`,
     `ROUGH NOTES: ${character.personality || '(none given)'}`,
     `EXISTING QUIRKS (keep these): ${character.quirks || '(none)'}`,
+    guildBlock,
     `Write the sheet as JSON.`,
   ].join('\n');
   const content = await callAI(DRAFT_SYSTEM_PROMPT, userMsg);
@@ -334,7 +339,9 @@ async function generateChatReply(history) {
   if (messages.length === 0 || messages[messages.length - 1].role !== 'user') {
     throw new Error('empty chat message');
   }
-  const content = await callAIMessages([{ role: 'system', content: CHAT_SYSTEM_PROMPT }, ...messages]);
+  const guildBlock = guildPromptBlock(await getGuild(config));
+  const system = guildBlock ? `${CHAT_SYSTEM_PROMPT}\n\n${guildBlock}` : CHAT_SYSTEM_PROMPT;
+  const content = await callAIMessages([{ role: 'system', content: system }, ...messages]);
   const text = String(content || '').trim();
   if (!text) throw new Error('AI returned empty chat reply');
   return text;
@@ -474,13 +481,14 @@ async function handleChatPost(req, res) {
 
 /** Everything the frontend needs in one poll: status, character, latest
  * in-game suggestions, and the chat history. */
-function handleState(res) {
+async function handleState(res) {
   const wowRoot = deriveWowRoot(config);
   const sv = wowRoot ? findSavedVariablesFile(wowRoot) : null;
   let svData = {};
   try {
     if (sv) svData = parseSavedVariables(fs.readFileSync(sv, 'utf8'));
   } catch { /* stale/missing is fine */ }
+  const guild = await getGuild(config);
   let h = {};
   try {
     h = parseSavedVariables(fs.readFileSync(resolveHandoffTarget().file, 'utf8'));
@@ -516,17 +524,83 @@ function handleState(res) {
     suggestionsTone: h.tone || null,
     suggestionsScene: h.scene || null,
     chat: loadChatHistory(),
+    guild,
+    guildEnabled: guildEnabled(config),
+    guildName: config.guild?.name || (guild && guild.name) || '',
   });
 }
 
-const server = http.createServer((req, res) => {
+/** Read a JSON request body as a promise. */
+function readBody(req) {
+  return new Promise((resolve) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => resolve(body));
+  });
+}
+
+async function handleGuildMembers(req, res, url) {
+  if (req.method === 'POST') {
+    const body = await readBody(req);
+    let member;
+    try {
+      member = JSON.parse(body || '{}');
+    } catch {
+      return sendJson(res, 400, { ok: false, error: 'bad JSON' });
+    }
+    if (!member.name || !String(member.name).trim()) {
+      return sendJson(res, 400, { ok: false, error: 'name required' });
+    }
+    const guild = await upsertMember(config, member);
+    if (!guild) return sendJson(res, 503, { ok: false, error: 'MongoDB unavailable (check config.mongodb.uri)' });
+    logLine(`guild member upserted: ${member.name}`);
+    return sendJson(res, 200, { ok: true, guild });
+  }
+  if (req.method === 'DELETE') {
+    const name = url.searchParams.get('name');
+    if (!name) return sendJson(res, 400, { ok: false, error: 'name query param required' });
+    const guild = await removeMember(config, name);
+    if (!guild) return sendJson(res, 503, { ok: false, error: 'MongoDB unavailable' });
+    logLine(`guild member removed: ${name}`);
+    return sendJson(res, 200, { ok: true, guild });
+  }
+  return sendJson(res, 405, { ok: false, error: 'use POST (upsert) or DELETE ?name=' });
+}
+
+const server = http.createServer(async (req, res) => {
   try {
-    const { pathname } = new URL(req.url, 'http://x');
+    const url = new URL(req.url, 'http://x');
+    const { pathname } = url;
     if (pathname === '/api/chat' && req.method === 'POST') {
       return handleChatPost(req, res);
     }
     if (pathname === '/api/state' && req.method === 'GET') {
       return handleState(res);
+    }
+    if (pathname === '/api/guild' && req.method === 'GET') {
+      const guild = await getGuild(config);
+      return sendJson(res, guild ? 200 : 503, { ok: Boolean(guild), guild, enabled: guildEnabled(config) });
+    }
+    if (pathname === '/api/guild' && req.method === 'POST') {
+      const body = await readBody(req);
+      let name = '';
+      try { name = String(JSON.parse(body || '{}').name || '').trim(); } catch { /* empty */ }
+      if (!name) return sendJson(res, 400, { ok: false, error: 'name required' });
+      config.guild = { ...(config.guild || {}), name };
+      try {
+        const cfgPath = path.join(ROOT, 'config.json');
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, ''));
+        cfg.guild = { ...(cfg.guild || {}), name };
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
+      } catch (err) {
+        logLine(`guild name persist failed: ${err.message}`);
+      }
+      logLine(`guild name set: ${name}`);
+      setGuildName(config, name).catch(() => {}); // also update the shared doc
+      return sendJson(res, 200, { ok: true, name });
+    }
+    if (pathname === '/api/guild/members') {
+      return handleGuildMembers(req, res, url);
     }
     if (pathname === '/api/log') {
       return sendJson(res, 200, {
@@ -595,6 +669,7 @@ let errLogOffset = _state.errLogOffset ?? null; // General.log tail position (nu
 // processed a NEW id — the stale (already-answered) SV id then looked
 // "unprocessed" and re-fired, wasting an AI call.
 let processedIds = new Set((_state.processedIds || []).map(String));
+let lastSheetSig = _state.lastSheetSig ?? null; // guild sheet auto-push dedupe
 if (lastChatId) processedIds.add(String(lastChatId));
 if (lastMainId) processedIds.add(String(lastMainId));
 function markProcessed(id) {
@@ -780,6 +855,28 @@ async function poll() {
   const reqId = parsed.reqId ? String(parsed.reqId) : null;
   if (reqId && !processedIds.has(reqId) && parsed.reqStatus === 'pending' && parsed.reqKind !== 'chat') {
     await runRequest({ lane: 'main', reqId, parsed });
+  }
+
+  // Auto-push this member's sheet to the shared guild roster when it changes
+  // (each guildie's watcher syncs their OWN character to Atlas — that's how
+  // the roster fills itself without anyone typing anything).
+  if (guildEnabled(config) && parsed.name) {
+    const sig = [parsed.name, parsed.level, parsed.personality, parsed.quirks].join('|');
+    if (sig !== lastSheetSig) {
+      lastSheetSig = sig;
+      saveState({ lastMainId, lastChatId, errLogOffset, processedIds: [...processedIds], lastSheetSig });
+      upsertMember(config, {
+        name: parsed.name,
+        race: parsed.race,
+        class: parsed.class,
+        level: parsed.level,
+        personality: parsed.personality,
+        quirks: parsed.quirks,
+        updatedBy: 'addon',
+      }).then((g) => {
+        if (g) logLine(`guild sheet synced: ${parsed.name} (${g.members.length} members in roster)`);
+      });
+    }
   }
 }
 
