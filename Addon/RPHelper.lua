@@ -132,6 +132,19 @@ local function AfterDelay(delay, fn)
   end
 end
 
+-- Prefer the CLIENT's C_Timer for scheduling reloads: our shim fires from
+-- raw OnUpdate context, which this client silently ignores for reloads
+-- (proven: shim-timer chains never produced a LOAD). Click-synchronous
+-- reloads work; client-timer context is the remaining candidate.
+local function AfterDelay(delay, fn)
+  local g = _G.C_Timer
+  if g and g.After then
+    g.After(delay, fn)
+  else
+    C_Timer.After(delay, fn) -- our shim (local)
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- SafeReload — reloads are the ONLY channel to the watcher (SavedVariables
 -- hit disk on reload; addons have no file/network IO). This client:
