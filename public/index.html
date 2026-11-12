@@ -178,20 +178,33 @@
       </section>
 
       <section class="panel card">
+        <h2>Character sheet</h2>
+        <textarea id="sheetScene" class="fld" rows="2" placeholder="Scene / what just happened…" style="width:100%; resize:vertical; margin-bottom:6px;"></textarea>
+        <textarea id="sheetPers" class="fld" rows="3" placeholder="Personality…" style="width:100%; resize:vertical; margin-bottom:6px;"></textarea>
+        <textarea id="sheetQuirks" class="fld" rows="2" placeholder="Speech quirks…" style="width:100%; resize:vertical; margin-bottom:6px;"></textarea>
+        <div class="row" style="margin-bottom:6px;">
+          <select id="sheetTone" class="fld" style="flex:1">
+            <option>Neutral</option><option>Warm/Friendly</option><option>Gruff/Tough</option>
+            <option>Witty/Flirty</option><option>Formal/Noble</option><option>Mysterious</option>
+          </select>
+          <select id="sheetCount" class="fld" style="width:64px">
+            <option>2</option><option>3</option><option>4</option><option>5</option>
+          </select>
+        </div>
+        <div class="row">
+          <button id="btnSuggest" style="flex:1; padding:6px; font-size:13px;">✨ Write suggestions</button>
+          <button id="btnDraft" class="ghost" style="padding:6px 10px; font-size:13px; background:#241c12; border-color:var(--panel-edge); color:var(--text-dim);">AI sheet draft</button>
+        </div>
+        <div class="dim" id="sheetStatus" style="margin-top:6px"></div>
+      </section>
+
+      <section class="panel card">
         <h2>Guild roster <span id="guildCount" class="dim"></span></h2>
         <div class="row" style="margin-bottom:8px;">
           <input id="guildName" class="fld" placeholder="Guild name…" style="flex:1" />
         </div>
         <div id="guildList"><div class="dim">Loading roster…</div></div>
-        <div class="row" style="margin-top:6px;">
-          <input id="gName" class="fld" placeholder="Name (required)" />
-          <input id="gRace" class="fld" placeholder="Race / Class" />
-        </div>
-        <div class="row" style="margin-top:4px;">
-          <input id="gPers" class="fld" placeholder="Personality (optional)" style="flex:1" />
-          <button id="gAdd" style="padding:0 12px;">Add</button>
-        </div>
-        <div class="dim" id="guildStatus" style="margin-top:6px"></div>
+        <div class="dim" id="guildStatus" style="margin-top:6px">members sync from each player's addon</div>
       </section>
 
       <section class="panel card">
@@ -364,36 +377,93 @@
       status.textContent = 'synced via MongoDB Atlas — every guildie\'s watcher shares this roster';
     }
 
-    async function addGuildMember() {
-      const name = $('gName').value.trim();
-      if (!name) { $('gName').focus(); return; }
-      const raceClass = $('gRace').value.trim();
-      const [race, ...cls] = raceClass.split(/\s+/);
-      const member = {
-        name,
-        race: race || '',
-        class: cls.join(' ') || '',
-        personality: $('gPers').value.trim(),
-        updatedBy: 'browser',
+    /* ---- Sheet (browser-owned; addon SV is fallback) ---- */
+    let sheetDirty = false;
+    function renderSheet(sheet) {
+      if (!sheet) return;
+      if (document.activeElement !== $('sheetScene')) $('sheetScene').value = sheet.scene || '';
+      if (document.activeElement !== $('sheetPers')) $('sheetPers').value = sheet.personality || '';
+      if (document.activeElement !== $('sheetQuirks')) $('sheetQuirks').value = sheet.quirks || '';
+      if (document.activeElement !== $('sheetTone')) $('sheetTone').value = sheet.tone || 'Neutral';
+      if (document.activeElement !== $('sheetCount')) $('sheetCount').value = String(sheet.count || 3);
+    }
+    function sheetBody() {
+      return {
+        scene: $('sheetScene').value.trim(),
+        personality: $('sheetPers').value.trim(),
+        quirks: $('sheetQuirks').value.trim(),
+        tone: $('sheetTone').value,
+        count: Number($('sheetCount').value),
       };
-      $('gAdd').disabled = true;
+    }
+    async function saveSheet() {
       try {
-        const r = await fetch('/api/guild/members', {
+        await fetch('/api/sheet', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(member),
+          body: JSON.stringify(sheetBody()),
+        });
+        sheetDirty = false;
+      } catch { /* retried on next edit */ }
+    }
+    ['sheetScene', 'sheetPers', 'sheetQuirks'].forEach((id) => {
+      $(id).addEventListener('input', () => {
+        sheetDirty = true;
+        clearTimeout(window._sheetTimer);
+        window._sheetTimer = setTimeout(saveSheet, 800);
+      });
+    });
+    ['sheetTone', 'sheetCount'].forEach((id) => $(id).addEventListener('change', saveSheet));
+
+    async function generateSuggestions() {
+      const btn = $('btnSuggest');
+      btn.disabled = true;
+      $('sheetStatus').textContent = 'generating…';
+      try {
+        await saveSheet();
+        const r = await fetch('/api/suggest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sheetBody()),
         });
         const d = await r.json();
         if (d.ok) {
-          $('gName').value = ''; $('gRace').value = ''; $('gPers').value = '';
-          renderGuild(d.guild, true, $('guildName').value, $('charName').textContent);
+          renderSuggestions(d.suggestions, 'generated just now · tone: ' + d.tone);
+          $('sheetStatus').textContent = '✓ ' + d.suggestions.length + ' suggestions ready';
         } else {
-          $('guildStatus').textContent = '⚠ ' + (d.error || 'failed');
+          $('sheetStatus').textContent = '⚠ ' + (d.error || 'failed');
         }
       } catch (err) {
-        $('guildStatus').textContent = '⚠ ' + err.message;
+        $('sheetStatus').textContent = '⚠ ' + err.message;
       } finally {
-        $('gAdd').disabled = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function generateDraft() {
+      const btn = $('btnDraft');
+      btn.disabled = true;
+      $('sheetStatus').textContent = 'drafting sheet…';
+      try {
+        await saveSheet();
+        const r = await fetch('/api/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sheetBody()),
+        });
+        const d = await r.json();
+        if (d.ok) {
+          $('sheetPers').value = d.personality || '';
+          $('sheetQuirks').value = d.quirks || '';
+          await saveSheet();
+          $('sheetStatus').textContent = '✓ sheet draft applied';
+        } else {
+          $('sheetStatus').textContent = '⚠ ' + (d.error || 'failed');
+        }
+      } catch (err) {
+        $('sheetStatus').textContent = '⚠ ' + err.message;
+      } finally {
+        btn.disabled = false;
       }
     }
 
@@ -444,6 +514,7 @@
           `<span class="${st.hasApiKey ? 'ok' : 'bad'}">● watcher</span> · ${st.model || '?'} · ${st.requestsServed} served`;
         if (s.guildName) $('title').textContent = s.guildName;
         renderCharacter(s.character, s.guildName);
+        renderSheet(s.sheet);
         renderGuild(s.guild, s.guildEnabled, s.guildName, s.character && s.character.name);
         $('wModel').textContent = st.model || '—';
         $('wServed').textContent = st.requestsServed;
@@ -463,8 +534,8 @@
     $('input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
-    $('gAdd').addEventListener('click', addGuildMember);
-    $('gName').addEventListener('keydown', (e) => { if (e.key === 'Enter') addGuildMember(); });
+    $('btnSuggest').addEventListener('click', generateSuggestions);
+    $('btnDraft').addEventListener('click', generateDraft);
     let nameTimer = null;
     $('guildName').addEventListener('input', () => {
       clearTimeout(nameTimer);

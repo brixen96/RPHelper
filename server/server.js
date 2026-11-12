@@ -52,6 +52,7 @@ function loadConfig() {
 const config = loadConfig();
 const PORT = config.port || 7331;
 let chatBusy = false; // one browser chat request at a time
+let genBusy = false; // one browser generation (suggestions/draft) at a time
 
 // Crash guards: a silent death means no AI replies in game and no clue why.
 // Log loudly (and to a file) instead of exiting.
@@ -330,6 +331,138 @@ function saveChatHistory(history) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sheet + suggestions — BROWSER-OWNED (v0.4.0). The addon only feeds
+// fallback data (SavedVariables) and live heartbeats; all editing and
+// generation happens over HTTP where it's instant.
+// ---------------------------------------------------------------------------
+const SHEET_FILE = path.join(ROOT, 'sheet.json');
+const SUGGESTIONS_FILE = path.join(ROOT, 'suggestions.json');
+
+function readJsonFile(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return fallback;
+  }
+}
+function writeJsonFile(file, data) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    logLine(`write ${path.basename(file)} failed: ${err.message}`);
+  }
+}
+function loadSheet() { return readJsonFile(SHEET_FILE, {}); }
+function saveSheet(sheet) { writeJsonFile(SHEET_FILE, { ...sheet, updatedAt: new Date().toISOString() }); }
+function loadSuggestionsFile() { return readJsonFile(SUGGESTIONS_FILE, null); }
+function saveSuggestionsFile(data) { writeJsonFile(SUGGESTIONS_FILE, data); }
+
+function readSvData() {
+  const wowRoot = deriveWowRoot(config);
+  const sv = wowRoot ? findSavedVariablesFile(wowRoot) : null;
+  if (!sv) return {};
+  try {
+    return parseSavedVariables(fs.readFileSync(sv, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/** Effective sheet: browser edits win, addon SavedVariables are fallback. */
+function effectiveSheet(sv = readSvData()) {
+  const sheet = loadSheet();
+  return {
+    scene: sheet.scene ?? sv.sceneDraft ?? '',
+    personality: sheet.personality ?? sv.personality ?? '',
+    quirks: sheet.quirks ?? sv.quirks ?? '',
+    tone: sheet.tone ?? sv.tone ?? 'Neutral',
+    count: Number(sheet.count ?? sv.count ?? 3),
+    updatedAt: sheet.updatedAt ?? null,
+    capturedScene: sv.sceneDraft || null, // scene captured from in-game chat
+  };
+}
+
+function sheetPayload(overrides = {}, sv = readSvData()) {
+  const sheet = effectiveSheet(sv);
+  const pick = (k, fb) => (overrides[k] !== undefined && overrides[k] !== null && overrides[k] !== '' ? overrides[k] : fb);
+  return {
+    character: {
+      name: sv.name || 'unknown',
+      raceClass: [sv.race, sv.class].filter(Boolean).join(' '),
+      personality: pick('personality', sheet.personality) || 'friendly newcomer',
+      quirks: pick('quirks', sheet.quirks) || 'none',
+    },
+    scene: { setting: pick('scene', sheet.scene) || 'a tavern', withWhom: '', recent: '' },
+    tone: pick('tone', sheet.tone) || 'Neutral',
+    count: Number(pick('count', sheet.count)) || 3,
+  };
+}
+
+/** POST /api/suggest — instant suggestions from the browser. */
+async function handleSuggestPost(req, res) {
+  if (genBusy) return sendJson(res, 429, { ok: false, error: 'still generating the last batch…' });
+  genBusy = true;
+  try {
+    let body = {};
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { ok: false, error: 'bad JSON' }); }
+    if (!config.openrouter?.apiKey) return sendJson(res, 503, { ok: false, error: 'No API key — add one to config.json and restart the watcher.' });
+    const payload = sheetPayload(body);
+    if (!String(payload.scene.setting).trim()) return sendJson(res, 400, { ok: false, error: 'describe the scene first' });
+    const suggestions = await generateWithAI(payload);
+    const at = new Date().toISOString();
+    saveSuggestionsFile({ suggestions, at, tone: payload.tone, scene: payload.scene.setting });
+    stats.requestsServed += 1;
+    stats.lastRequestAt = at;
+    stats.lastError = null;
+    logLine(`browser suggestions: ${suggestions.length} (scene: ${String(payload.scene.setting).slice(0, 60)})`);
+    return sendJson(res, 200, { ok: true, suggestions, at, tone: payload.tone, scene: payload.scene.setting });
+  } catch (err) {
+    stats.lastError = err.message;
+    logLine(`suggest failed: ${err.message}`);
+    return sendJson(res, 502, { ok: false, error: err.message });
+  } finally {
+    genBusy = false;
+  }
+}
+
+/** POST /api/draft — AI sheet draft (personality + quirks) from the browser. */
+async function handleDraftPost(req, res) {
+  if (genBusy) return sendJson(res, 429, { ok: false, error: 'still generating…' });
+  genBusy = true;
+  try {
+    let body = {};
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { ok: false, error: 'bad JSON' }); }
+    if (!config.openrouter?.apiKey) return sendJson(res, 503, { ok: false, error: 'No API key — add one to config.json and restart the watcher.' });
+    const payload = sheetPayload(body);
+    const draft = await generateDraftWithAI(payload);
+    stats.requestsServed += 1;
+    stats.lastRequestAt = new Date().toISOString();
+    stats.lastError = null;
+    logLine(`browser sheet draft: personality ${draft.personality.length} chars`);
+    return sendJson(res, 200, { ok: true, ...draft });
+  } catch (err) {
+    stats.lastError = err.message;
+    logLine(`draft failed: ${err.message}`);
+    return sendJson(res, 502, { ok: false, error: err.message });
+  } finally {
+    genBusy = false;
+  }
+}
+
+/** POST /api/sheet — save browser sheet edits (partial merge). */
+async function handleSheetPost(req, res) {
+  let body = {};
+  try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { ok: false, error: 'bad JSON' }); }
+  const sheet = loadSheet();
+  for (const k of ['scene', 'personality', 'quirks', 'tone']) {
+    if (body[k] !== undefined && body[k] !== null) sheet[k] = String(body[k]);
+  }
+  if (body.count !== undefined && body.count !== null) sheet.count = Number(body.count) || 3;
+  saveSheet(sheet);
+  return sendJson(res, 200, { ok: true, sheet: effectiveSheet() });
+}
+
 async function generateChatReply(history) {
   if (!config.openrouter?.apiKey) return null;
   const messages = (Array.isArray(history) ? history : [])
@@ -521,15 +654,15 @@ async function handleState(res) {
       hpMax: svData.hpMax ?? null,
       updatedAt: svData.updatedAt || null,
     },
-    scene: svData.sceneDraft || '',
-    personality: svData.personality || '',
-    quirks: svData.quirks || '',
-    tone: svData.tone || 'Neutral',
-    count: svData.count || 3,
-    suggestions: Array.isArray(h.suggestions) ? h.suggestions : [],
-    suggestionsAt: h.generatedAt || null,
-    suggestionsTone: h.tone || null,
-    suggestionsScene: h.scene || null,
+    sheet: effectiveSheet(svData),
+    suggestions: (function () {
+      const f = loadSuggestionsFile();
+      if (f && Array.isArray(f.suggestions) && f.suggestions.length) return f.suggestions;
+      return Array.isArray(h.suggestions) ? h.suggestions : [];
+    })(),
+    suggestionsAt: (loadSuggestionsFile() || {}).at || h.generatedAt || null,
+    suggestionsTone: (loadSuggestionsFile() || {}).tone || h.tone || null,
+    suggestionsScene: (loadSuggestionsFile() || {}).scene || h.scene || null,
     chat: loadChatHistory(),
     guild,
     guildEnabled: guildEnabled(config),
@@ -547,21 +680,10 @@ function readBody(req) {
 }
 
 async function handleGuildMembers(req, res, url) {
+  // v0.4.0: members are added ONLY by addon sync (each player's watcher
+  // pushes their own sheet) — no browser add. DELETE stays for cleanup.
   if (req.method === 'POST') {
-    const body = await readBody(req);
-    let member;
-    try {
-      member = JSON.parse(body || '{}');
-    } catch {
-      return sendJson(res, 400, { ok: false, error: 'bad JSON' });
-    }
-    if (!member.name || !String(member.name).trim()) {
-      return sendJson(res, 400, { ok: false, error: 'name required' });
-    }
-    const guild = await upsertMember(config, member);
-    if (!guild) return sendJson(res, 503, { ok: false, error: 'MongoDB unavailable (check config.mongodb.uri)' });
-    logLine(`guild member upserted: ${member.name}`);
-    return sendJson(res, 200, { ok: true, guild });
+    return sendJson(res, 405, { ok: false, error: 'members are added by addon sync only' });
   }
   if (req.method === 'DELETE') {
     const name = url.searchParams.get('name');
@@ -580,6 +702,15 @@ const server = http.createServer(async (req, res) => {
     const { pathname } = url;
     if (pathname === '/api/chat' && req.method === 'POST') {
       return handleChatPost(req, res);
+    }
+    if (pathname === '/api/suggest' && req.method === 'POST') {
+      return handleSuggestPost(req, res);
+    }
+    if (pathname === '/api/draft' && req.method === 'POST') {
+      return handleDraftPost(req, res);
+    }
+    if (pathname === '/api/sheet' && req.method === 'POST') {
+      return handleSheetPost(req, res);
     }
     if (pathname === '/api/state' && req.method === 'GET') {
       return handleState(res);

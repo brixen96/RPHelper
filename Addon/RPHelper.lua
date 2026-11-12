@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.3.3"
+local VERSION = "0.4.0"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -72,10 +72,6 @@ local C_Timer = {
 -- ---------------------------------------------------------------------------
 local db = nil
 local panel = nil
-local rows = {}
-
-local TONES = { "Neutral", "Warm/Friendly", "Gruff/Tough", "Witty/Flirty", "Formal/Noble", "Mysterious" }
-local COUNTS = { 2, 3, 4, 5 }
 
 -- Chat capture: rolling buffer of recent IC speech / emotes for the scene box
 local chatLines = {}
@@ -312,75 +308,8 @@ local function InsertIntoChat(text)
   end
 end
 
--- ---------------------------------------------------------------------------
--- Suggestion rows
--- ---------------------------------------------------------------------------
-local function CreateRow(parent, index)
-  local row = CreateFrame("Button", nil, parent, "BackdropTemplate")
-  row:SetHeight(44)
-  row:SetBackdrop({
-    bgFile = "Interface\\Buttons\\WHITE8X8",
-    edgeFile = "Interface\\Buttons\\WHITE8X8",
-    edgeSize = 1,
-  })
-  row:SetBackdropColor(0.12, 0.10, 0.08, 0.9)
-  row:SetBackdropBorderColor(0.35, 0.28, 0.16, 1)
-
-  local num = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  num:SetPoint("LEFT", 8, 0)
-  num:SetTextColor(0.8, 0.65, 0.3)
-  num:SetText(index .. ".")
-
-  local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  text:SetPoint("LEFT", num, "RIGHT", 8, 0)
-  text:SetPoint("RIGHT", row, "RIGHT", -8, 0)
-  text:SetJustifyH("LEFT")
-  text:SetWordWrap(true)
-  row.textFs = text
-
-  row:SetScript("OnEnter", function(self)
-    self:SetBackdropColor(0.2, 0.17, 0.1, 1)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Click to insert into chat", 1, 1, 1)
-    GameTooltip:Show()
-  end)
-  row:SetScript("OnLeave", function(self)
-    self:SetBackdropColor(0.12, 0.10, 0.08, 0.9)
-    GameTooltip:Hide()
-  end)
-  row:SetScript("OnClick", function()
-    InsertIntoChat(row.suggestion or "")
-  end)
-
-  return row
-end
-
-local function LayoutRows(suggestions)
-  local container = panel.rowsContainer
-  for _, row in ipairs(rows) do row:Hide() end
-  wipe(rows)
-
-  local gap = 6
-  local height = (container:GetHeight() - gap * (#suggestions - 1)) / #suggestions
-  height = math.max(26, math.min(height, 70))
-
-  for i, suggestion in ipairs(suggestions) do
-    local row = rows[i] or CreateRow(container, i)
-    rows[i] = row
-    row.suggestion = suggestion
-    row.textFs:SetText(suggestion)
-    row:ClearAllPoints()
-    if i == 1 then
-      row:SetPoint("TOPLEFT", container, "TOPLEFT", 0, 0)
-      row:SetPoint("TOPRIGHT", container, "TOPRIGHT", 0, 0)
-    else
-      row:SetPoint("TOPLEFT", rows[i - 1], "BOTTOMLEFT", 0, -gap)
-      row:SetPoint("TOPRIGHT", rows[i - 1], "BOTTOMRIGHT", 0, -gap)
-    end
-    row:SetHeight(height)
-    row:Show()
-  end
-end
+-- (Suggestion rows removed in v0.4.0 — suggestions are generated and shown
+-- in the browser; the addon only displays status.)
 
 -- ---------------------------------------------------------------------------
 -- Character info line (shows captured player data so the user can confirm
@@ -561,148 +490,25 @@ local function CreatePanel()
   charInfo:SetText(PlayerInfoText())
   f.charInfoFs = charInfo
 
-  -- Plain EditBox with backdrop: InputScrollFrameTemplate throws Lua errors
-  -- on this client (InputBoxTemplates.lua:102 error storms in General.log).
-  local function MakeInputBox(parent, w, h, multiline, maxLetters)
-    local box = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
-    box:SetSize(w, h)
-    box:SetBackdrop({
-      bgFile = "Interface\\Buttons\\WHITE8X8",
-      edgeFile = "Interface\\Buttons\\WHITE8X8",
-      edgeSize = 1,
-    })
-    box:SetBackdropColor(0, 0, 0, 0.6)
-    box:SetBackdropBorderColor(0.35, 0.28, 0.16, 1)
-    box:SetFontObject("GameFontHighlight")
-    box:SetTextInsets(6, 6, 4, 4)
-    box:SetMaxLetters(maxLetters or 400)
-    if multiline then box:SetMultiLine(true) end
-    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    return box
-  end
+  -- v0.4.0: the addon is a SENSOR + DISPLAY. All editing and generation
+  -- lives in the browser (http://127.0.0.1:7331). In-game keeps: status,
+  -- character line, Check, Copy log, scene capture, heartbeats.
+  local info = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  info:SetPoint("TOP", charInfo, "BOTTOM", 0, -16)
+  info:SetWidth(400)
+  info:SetJustifyH("CENTER")
+  info:SetText("Sheet, chat & suggestions live in the browser:")
+  local url = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  url:SetPoint("TOP", info, "BOTTOM", 0, -4)
+  url:SetWidth(400)
+  url:SetJustifyH("CENTER")
+  url:SetText("http://127.0.0.1:7331")
 
-  -- Scene box: each box sits 24px below the previous element so its label
-  -- (8px above the box) always has clearance, even when status wraps to 2 lines
-  local sceneBox = MakeInputBox(f, 400, 48, true, 400)
-  sceneBox:SetPoint("TOPLEFT", charInfo, "BOTTOMLEFT", -4, -24)
-  sceneBox:SetText(db and db.sceneDraft or "")
-  f.sceneBox = sceneBox
-
-  local sceneLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  sceneLabel:SetPoint("BOTTOMLEFT", sceneBox, "TOPLEFT", 2, 8)
-  sceneLabel:SetText("Scene / what just happened:")
-  f.sceneLabel = sceneLabel
-
-  -- Character sheet: personality
-  local personalityBox = MakeInputBox(f, 400, 36, true, 300)
-  personalityBox:SetPoint("TOPLEFT", sceneBox, "BOTTOMLEFT", 0, -24)
-  personalityBox:SetText(db and db.personality or "")
-  f.personalityBox = personalityBox
-
-  local personalityLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  personalityLabel:SetPoint("BOTTOMLEFT", personalityBox, "TOPLEFT", 2, 8)
-  personalityLabel:SetText("Personality:")
-
-  -- Character sheet: speech quirks
-  local quirksBox = MakeInputBox(f, 400, 36, true, 300)
-  quirksBox:SetPoint("TOPLEFT", personalityBox, "BOTTOMLEFT", 0, -24)
-  quirksBox:SetText(db and db.quirks or "")
-  f.quirksBox = quirksBox
-
-  local quirksLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  quirksLabel:SetPoint("BOTTOMLEFT", quirksBox, "TOPLEFT", 2, 8)
-  quirksLabel:SetText("Speech quirks:")
-
-  -- Persist the sheet on every keystroke: SavedVariables are written by the
-  -- game on /reload or logout, so the current db always survives restarts.
-  -- (Keeps the template's own OnTextChanged handler for scroll behavior.)
-  local function hookSheetSave(box, key)
-    local orig = box:GetScript("OnTextChanged")
-    box:SetScript("OnTextChanged", function(self, userInput)
-      -- pcall: a template handler error must never abort the save
-      if orig then pcall(orig, self, userInput) end
-      if db then db[key] = self:GetText() end
-    end)
-  end
-  hookSheetSave(sceneBox, "sceneDraft")
-  hookSheetSave(personalityBox, "personality")
-  hookSheetSave(quirksBox, "quirks")
-
-  -- Tone dropdown
-  local dropdown = CreateFrame("Frame", "RPHelperToneDropdown", f, "UIDropDownMenuTemplate")
-  dropdown:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", -6, -14)
-  UIDropDownMenu_SetWidth(dropdown, 130)
-  UIDropDownMenu_SetText(dropdown, db and db.tone or "Neutral")
-  UIDropDownMenu_Initialize(dropdown, function(self, level)
-    for _, tone in ipairs(TONES) do
-      local info = UIDropDownMenu_CreateInfo()
-      info.text = tone
-      info.checked = (tone == (db and db.tone or "Neutral"))
-      info.func = function()
-        db.tone = tone
-        UIDropDownMenu_SetText(dropdown, tone)
-        CloseDropDownMenus()
-      end
-      UIDropDownMenu_AddButton(info, level)
-    end
-  end)
-  f.toneDropdown = dropdown
-
-  -- Count dropdown
-  local countDd = CreateFrame("Frame", "RPHelperCountDropdown", f, "UIDropDownMenuTemplate")
-  countDd:SetPoint("LEFT", dropdown, "RIGHT", 40, 0)
-  UIDropDownMenu_SetWidth(countDd, 50)
-  UIDropDownMenu_SetText(countDd, tostring(db and db.count or 3))
-  UIDropDownMenu_Initialize(countDd, function(self, level)
-    for _, n in ipairs(COUNTS) do
-      local info = UIDropDownMenu_CreateInfo()
-      info.text = tostring(n)
-      info.checked = (n == (db and db.count or 3))
-      info.func = function()
-        db.count = n
-        UIDropDownMenu_SetText(countDd, tostring(n))
-        CloseDropDownMenus()
-      end
-      UIDropDownMenu_AddButton(info, level)
-    end
-  end)
-  f.countDd = countDd
-
-  -- Button row: on its OWN row below the dropdowns — tone + count + both
-  -- buttons on one row overflowed the panel (visible overlap in screenshot)
-  -- pcall wrappers: any error prints to chat instead of dying silently
-  -- (this is how the missing-C_Timer bug stayed invisible for so long)
-  local function safeCall(fn)
-    local ok, err = pcall(fn)
-    if not ok then
-      LogEvent("ERROR " .. tostring(err))
-      print("|cffffcc00RPHelper|r error: " .. tostring(err))
-    end
-  end
-
-  local draftBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  draftBtn:SetSize(110, 24)
-  draftBtn:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -48)
-  draftBtn:SetText("AI sheet draft")
-  draftBtn:SetScript("OnClick", function() safeCall(ns.RequestDraft) end)
-  f.draftBtn = draftBtn
-
-  local generate = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  generate:SetSize(150, 24)
-  generate:SetPoint("RIGHT", draftBtn, "LEFT", -8, 0)
-  generate:SetText("Write suggestions")
-  generate:SetScript("OnClick", function() safeCall(ns.RequestSuggestions) end)
-  f.generateBtn = generate
-
-  -- Suggestions container (fixed height so the chat section below has room)
-  local container = CreateFrame("Frame", nil, f)
-  container:SetPoint("TOPLEFT", quirksBox, "BOTTOMLEFT", 0, -82)
-  container:SetPoint("TOPRIGHT", quirksBox, "BOTTOMRIGHT", 0, -82)
-  container:SetHeight(170)
-  f.rowsContainer = container
-
-  -- Chat lives in the BROWSER now (http://127.0.0.1:7331) — instant, no
-  -- reloads. In-game keeps: scene, sheet, suggestions, Check, Copy log.
+  local tip = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  tip:SetPoint("TOP", url, "BOTTOM", 0, -14)
+  tip:SetWidth(400)
+  tip:SetJustifyH("CENTER")
+  tip:SetText("This panel feeds the site: character, scene capture, live status.")
   local copyBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
   copyBtn:SetSize(80, 24)
   copyBtn:SetPoint("BOTTOMRIGHT", -16, 14)
@@ -726,14 +532,6 @@ local function CreatePanel()
   local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   hint:SetPoint("BOTTOMLEFT", 16, 20)
   hint:SetText("AI chat: 127.0.0.1:7331 · /rph help")
-
-  -- Persist the sheet whenever the panel closes (SavedVariables save on reload/logout)
-  f:SetScript("OnHide", function(self)
-    if not db then return end
-    db.sceneDraft = self.sceneBox:GetText()
-    db.personality = self.personalityBox:GetText()
-    db.quirks = self.quirksBox:GetText()
-  end)
 
   f:Hide()
   panel = f
@@ -905,168 +703,13 @@ local function CaptureChatLine(msg)
   while #chatLines > MAX_CHAT_LINES do
     table.remove(chatLines)
   end
-  -- Live-update the scene box if the panel is open and the box is empty
-  if panel and panel.sceneBox and strtrim(panel.sceneBox:GetText() or "") == "" then
-    panel.sceneBox:SetText(table.concat(chatLines, "\n"))
-    if db then db.sceneDraft = panel.sceneBox:GetText() end
-  end
+  -- Capture into SavedVariables — the browser reads it as the scene fallback
+  if db then db.sceneDraft = table.concat(chatLines, "\n") end
 end
 
--- ---------------------------------------------------------------------------
--- Request flow
--- ---------------------------------------------------------------------------
--- Writes a pending request into SavedVariables and reloads the UI so the
--- game persists them to disk (where the companion app can read them).
-function ns.RequestSuggestions()
-  if not db then return end
-  local scene = panel and panel.sceneBox and panel.sceneBox:GetText() or ""
-  scene = strtrim(scene)
-  if scene == "" then
-    if panel and panel.statusFs then
-      panel.statusFs:SetText("Describe the scene first (or use /rph set <scene>).")
-    end
-    return
-  end
-  db.sceneDraft = scene
-  db.personality = strtrim(panel.personalityBox:GetText() or "")
-  db.quirks = strtrim(panel.quirksBox:GetText() or "")
-  -- NOTE: do NOT clear chatPending here — chat and suggestions now run on
-  -- independent watcher lanes and can be in flight at the same time.
-  db.waitGaveUp = nil
-  db.reqId = RequestId()
-  db.reqStatus = "pending"
-  db.reqKind = "suggestions"
-  db.reqAttempts = 0
-  db.lastError = nil
-  db.reqScene = scene
-  db.reqTone = db.tone or "Neutral"
-  db.reqCount = db.count or 3
-  db.reqPersonality = db.personality
-  db.reqQuirks = db.quirks
-  if panel and panel.statusFs then
-    panel.statusFs:SetText("Sending request... reloading UI, suggestions arrive in a moment.")
-  end
-  -- Schedule the reload FIRST — if anything below fails, the handshake
-  -- must still happen (this ordering bug is why requests never sent)
-  if TrySaveNow() then
-    LogEvent(("SEND suggestions id=%s sceneLen=%d saved-no-reload"):format(db.reqId, #scene))
-    panel.statusFs:SetText("Sending... suggestions arrive in a few seconds (one reload, not now).")
-    print("|cffffcc00RPHelper|r sending request (no reload)...")
-    SafeReloadLater(5, "post-send-suggestions")
-  else
-    LogEvent(("SEND suggestions id=%s sceneLen=%d error-channel"):format(db.reqId, #scene))
-    panel.statusFs:SetText("Sending... if no reply in ~15s, click Check.")
-    print("|cffffcc00RPHelper|r sending request (no reload)...")
-    EmitLater({
-      kind = "suggestions", id = db.reqId, scene = scene,
-      tone = db.reqTone, count = tostring(db.reqCount),
-      personality = db.reqPersonality, quirks = db.reqQuirks,
-    })
-    SafeReloadLater(10, "post-send-suggestions")
-  end
-end
-
--- AI sheet draft: asks the companion to expand the personality notes into a
--- polished personality + speech quirks draft (same reload handshake).
-function ns.RequestDraft()
-  if not db then return end
-  db.personality = strtrim(panel.personalityBox:GetText() or "")
-  db.quirks = strtrim(panel.quirksBox:GetText() or "")
-  db.waitGaveUp = nil
-  db.reqId = RequestId()
-  db.reqStatus = "pending"
-  db.reqKind = "draft"
-  db.reqAttempts = 0
-  db.lastError = nil
-  db.reqScene = db.sceneDraft or ""
-  db.reqTone = db.tone or "Neutral"
-  db.reqCount = 1
-  db.reqPersonality = db.personality
-  db.reqQuirks = db.quirks
-  if panel and panel.statusFs then
-    panel.statusFs:SetText("Drafting sheet from your notes... reloading UI.")
-  end
-  if TrySaveNow() then
-    LogEvent("SEND draft id=" .. db.reqId .. " saved-no-reload")
-    print("|cffffcc00RPHelper|r drafting character sheet (no reload)...")
-    SafeReloadLater(5, "post-send-draft")
-  else
-    LogEvent("SEND draft id=" .. db.reqId .. " error-channel")
-    panel.statusFs:SetText("Drafting sheet... no reload now - result in a few seconds.")
-    print("|cffffcc00RPHelper|r drafting character sheet (no reload)...")
-    EmitLater({
-      kind = "draft", id = db.reqId, scene = db.reqScene,
-      tone = db.reqTone, count = "1",
-      personality = db.reqPersonality, quirks = db.reqQuirks,
-    })
-    SafeReloadLater(10, "post-send-draft")
-  end
-end
-
--- The addon can only see the companion's answer after a UI reload (the
--- handoff file is read at load time). While a request is pending we
--- schedule a reload every few seconds until the answer arrives or we hit
--- the attempt cap. (WAIT_INTERVAL / MAX_ATTEMPTS declared at top of file.)
-local function ScheduleAnswerWait()
-  if not (db and db.reqStatus == "pending") then return end
-  local attempts = db.reqAttempts or 0
-  if attempts >= MAX_ATTEMPTS then
-    -- Auto-reload window exhausted: KEEP reqStatus pending so a LATE reply
-    -- still displays on the next load — just stop the reload storm.
-    if not db.waitGaveUp then
-      db.waitGaveUp = true
-      LogEvent("WAIT gave up - kept pending for late display")
-      print("|cffffcc00RPHelper|r still waiting on the watcher - see RPHelperLog.txt. The reply will appear on the next reload.")
-    end
-    ns.Refresh()
-    return
-  end
-  attempts = attempts + 1
-  db.reqAttempts = attempts
-  local h = GetHandoff()
-  LogEvent(("WAIT attempt=%d handoffKind=%s handoffId=%s myId=%s"):format(
-    attempts, tostring(h and h.kind), tostring(h and h.requestId), tostring(db.reqId)))
-  -- Keep the panel visible during the wait so the reloads are obvious
-  ns.Refresh()
-  panel.statusFs:SetText(("Waiting for AI... (attempt %d/%d)"):format(attempts, MAX_ATTEMPTS))
-  SafeReload("wait-main") -- cooldown-aware: defers out of the load window
-end
-
--- Called on load: if the companion answered our request, show it;
--- otherwise keep waiting (bounded reload loop).
-local function CheckHandoff()
-  local handoff = GetHandoff()
-  if not (db and db.reqStatus == "pending") then return false end
-  if db.reqKind == "chat" then return false end -- chat answers go to CheckChatReply
-  if handoff and handoff.requestId and tostring(handoff.requestId) == tostring(db.reqId) then
-    LogEvent("REPLY matched id=" .. tostring(db.reqId) .. " kind=" .. tostring(handoff.kind))
-    db.reqStatus = handoff.error and "failed" or "done"
-    db.lastError = handoff.error
-    if handoff.error then
-      print("|cffffcc00RPHelper|r AI error: " .. tostring(handoff.error))
-    elseif handoff.kind == "draft" then
-      -- Apply the drafted sheet straight into the panel + SavedVariables
-      if handoff.personality and handoff.personality ~= "" then
-        db.personality = handoff.personality
-        if panel then panel.personalityBox:SetText(handoff.personality) end
-      end
-      if handoff.quirks and handoff.quirks ~= "" then
-        db.quirks = handoff.quirks
-        if panel then panel.quirksBox:SetText(handoff.quirks) end
-      end
-      print("|cffffcc00RPHelper|r sheet draft ready - review it above.")
-      if panel and panel.statusFs then
-        panel.statusFs:SetText("Sheet draft applied - edit it, then Write suggestions.")
-      end
-    else
-      print("|cffffcc00RPHelper|r suggestions ready!")
-    end
-    ns.Refresh()
-    return true
-  end
-  ScheduleAnswerWait()
-  return false
-end
+-- (Request flow + wait/reply loop removed in v0.4.0 — generation happens
+-- over HTTP in the browser: POST /api/suggest, /api/draft. The addon only
+-- feeds data: character, scene capture, heartbeats, status.)
 
 -- ---------------------------------------------------------------------------
 -- Refresh / display
@@ -1076,25 +719,15 @@ function ns.Refresh()
   UpdateCharInfo()
   local handoff = GetHandoff()
   if handoff and handoff.error then
-    panel.statusFs:SetText(("AI error: %s — try again or check the companion app."):format(handoff.error))
-    panel:Show()
-    return
-  end
-  if handoff and handoff.kind == "draft" then
-    panel.statusFs:SetText("Sheet draft applied - edit it, then Write suggestions.")
-    panel:Show()
-    return
-  end
-  if handoff and handoff.suggestions and #handoff.suggestions > 0 then
-    panel.statusFs:SetText(("Updated %s  ·  tone: %s"):format(
+    panel.statusFs:SetText(("AI error: %s"):format(handoff.error))
+  elseif handoff and handoff.suggestions and #handoff.suggestions > 0 then
+    panel.statusFs:SetText(("Last suggestions: %s · tone: %s — open the browser"):format(
       tostring(handoff.generatedAt or "?"):sub(1, 19),
       tostring(handoff.tone or "-")))
-    LayoutRows(handoff.suggestions)
-    panel:Show()
   else
-    panel.statusFs:SetText("No suggestions yet - describe the scene and click Write suggestions.")
-    panel:Show()
+    panel.statusFs:SetText("Generate in the browser: http://127.0.0.1:7331")
   end
+  panel:Show()
 end
 
 -- ---------------------------------------------------------------------------
@@ -1105,24 +738,6 @@ local function HandleSlash(msg)
   cmd = strlower(strtrim(cmd or ""))
   if cmd == "reload" then
     ns.Refresh()
-  elseif cmd == "set" and rest and strtrim(rest) ~= "" then
-    if not panel then CreatePanel() end
-    panel.sceneBox:SetText(strtrim(rest))
-    db.sceneDraft = strtrim(rest)
-    ns.RequestSuggestions()
-  elseif cmd == "tone" and rest then
-    local wanted = strlower(strtrim(rest))
-    for _, tone in ipairs(TONES) do
-      if strlower(tone) == wanted then
-        db.tone = tone
-        if panel and panel.toneDropdown then
-          UIDropDownMenu_SetText(panel.toneDropdown, tone)
-        end
-        print("|cffffcc00RPHelper|r tone set to " .. tone)
-        return
-      end
-    end
-    print("|cffffcc00RPHelper|r unknown tone. Options: " .. table.concat(TONES, ", "))
   elseif cmd == "check" then
     if panel and panel.statusFs then panel.statusFs:SetText("Checking for a reply...") end
     SafeReload("check-slash", true)
@@ -1136,11 +751,9 @@ local function HandleSlash(msg)
     ns.ShowLogBox(db and db.eventsText or "(no log yet)")
   elseif cmd == "help" then
     print(("|cffffcc00RPHelper|r v%s commands:"):format(VERSION))
-    print("  /rph — toggle panel")
-    print("  /rph chat — AI chat panel (letters, replies, etiquette)")
-    print("  /rph set <scene> — describe scene and generate")
-    print("  /rph tone <name> — " .. table.concat(TONES, ", "))
-    print("  /rph reload — refresh panel from last answer")
+    print("  /rph — toggle panel (sensor + status)")
+    print("  /rph web — open the guild website URL")
+    print("  /rph reload — refresh panel status")
     print("  /rph check — reload now to fetch a pending reply")
     print("  /rph log — show diagnostics (select + Ctrl+C)")
     print("  /rph show — reopen the log box")
@@ -1229,14 +842,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     -- minutes (error channel, popups suppressed) so the guild website stays
     -- fresh without any reloads.
     ScheduleHeartbeat(10)
-    if not CheckHandoff() then
-      -- Show the panel automatically when there are suggestions to pick from.
-      local handoff = GetHandoff()
-      if handoff and handoff.suggestions and #handoff.suggestions > 0 then
-        ns.Refresh()
-      end
-    end
-    print(("|cffffcc00RPHelper|r v%s loaded — |cffffcc00/rph|r panel · AI chat in browser: |cffffcc00http://127.0.0.1:7331|r"):format(VERSION))
+    print(("|cffffcc00RPHelper|r v%s loaded — |cffffcc00/rph|r status · guild site: |cffffcc00http://127.0.0.1:7331|r"):format(VERSION))
   elseif event == "PLAYER_LOGIN" or event == "PLAYER_LEVEL_UP" then
     CapturePlayerInfo()
   elseif event == "PLAYER_ENTERING_WORLD" then
