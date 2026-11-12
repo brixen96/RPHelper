@@ -9,4 +9,4 @@ dist/
 .rphelper-state.json
 RPHelperLog.txt
 *.log
-.DS_Store
+.DS_Storechat-history.json

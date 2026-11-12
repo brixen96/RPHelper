@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.2.9"
+local VERSION = "0.3.0"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -294,6 +294,33 @@ local function ProbeSaveApi()
   end)
   db.saveApiWorks = ok
   LogEvent("SAVE probe: " .. (ok and "SaveAddOnVariables WORKS (no-reload sends enabled)" or ("no - " .. tostring(err))))
+end
+
+-- ---------------------------------------------------------------------------
+-- Error channel (v0.3.0): General.log receives Lua errors in REAL-TIME
+-- (verified: error storms logged per-second during play), so a deliberate
+-- error carrying the request payload reaches the watcher with NO reload.
+-- The watcher tails General.log for `RPHelperREQ:{json}`. A deferred reload
+-- (+10s, cooldown-aware) remains as the guaranteed persistence fallback.
+-- Emit is scheduled via timer so it escapes the buttons' pcall wrappers.
+-- ---------------------------------------------------------------------------
+local function EmitRequest(obj)
+  local function esc(s)
+    s = tostring(s or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "")
+    return '"' .. s .. '"'
+  end
+  local parts = {}
+  for k, v in pairs(obj) do
+    parts[#parts + 1] = esc(k) .. ":" .. esc(v)
+  end
+  -- level 0: no position prefix, keeps the log line parseable
+  error("RPHelperREQ:{" .. table.concat(parts, ",") .. "}", 0)
+end
+
+local function EmitLater(obj)
+  AfterDelay(0.05, function()
+    EmitRequest(obj)
+  end)
 end
 
 -- (BuildLogReport / ExportLog live after PlayerInfoText — Lua locals are
@@ -866,17 +893,19 @@ function ns.SendChat()
   panel.chatInput:SetText("")
   ns.RefreshChat()
   if TrySaveNow() then
-    -- Request already on disk: NO reload at click. One delayed reload picks
-    -- up the reply (the handoff file is only readable at load time).
     LogEvent(("SEND chat id=%s len=%d saved-no-reload"):format(reqId, #text))
     panel.statusFs:SetText("Sending... reply arrives in a few seconds (one reload, not now).")
     print("|cffffcc00RPHelper|r sending chat message (no reload)...")
     SafeReloadLater(5, "post-send-chat")
   else
-    LogEvent(("SEND chat id=%s len=%d"):format(reqId, #text))
-    panel.statusFs:SetText("Sending chat message... reloading UI, reply arrives in a moment.")
-    print("|cffffcc00RPHelper|r sending chat message - reloading...")
-    SafeReload("send-chat", true) -- click origin: try now, defer if in cooldown
+    -- Error channel: request reaches the watcher in real-time, NO instant
+    -- reload. The +10s reload persists SavedVariables (fallback) and picks
+    -- up the reply (handoff files are only readable at load time).
+    LogEvent(("SEND chat id=%s len=%d error-channel"):format(reqId, #text))
+    panel.statusFs:SetText("Sending... no reload now - reply in a few seconds.")
+    print("|cffffcc00RPHelper|r sending chat message (no reload)...")
+    EmitLater({ kind = "chat", id = reqId, text = text })
+    SafeReloadLater(10, "post-send-chat")
   end
 end
 
@@ -896,7 +925,13 @@ local function CheckChatReply()
       ChatAppend("a", "[error] " .. tostring(handoff.error))
       print("|cffffcc00RPHelper|r chat AI error: " .. tostring(handoff.error))
     else
-      ChatAppend("a", tostring(handoff.chatReply or "(empty reply)"))
+      -- Server-side history is canonical (survives reload-free sends):
+      -- adopt it wholesale instead of appending a possibly-duplicate reply.
+      if type(handoff.chatHistoryFull) == "table" and #handoff.chatHistoryFull > 0 then
+        db.chatHistory = handoff.chatHistoryFull
+      else
+        ChatAppend("a", tostring(handoff.chatReply or "(empty reply)"))
+      end
       print("|cffffcc00RPHelper|r chat reply received!")
     end
     -- Show it NOW — no reload needed to display (history + pending clear
@@ -1092,9 +1127,15 @@ function ns.RequestSuggestions()
     print("|cffffcc00RPHelper|r sending request (no reload)...")
     SafeReloadLater(5, "post-send-suggestions")
   else
-    LogEvent(("SEND suggestions id=%s sceneLen=%d"):format(db.reqId, #scene))
-    print("|cffffcc00RPHelper|r sending request - reloading...")
-    SafeReload("send-suggestions", true) -- click origin: try now, defer if in cooldown
+    LogEvent(("SEND suggestions id=%s sceneLen=%d error-channel"):format(db.reqId, #scene))
+    panel.statusFs:SetText("Sending... no reload now - suggestions in a few seconds.")
+    print("|cffffcc00RPHelper|r sending request (no reload)...")
+    EmitLater({
+      kind = "suggestions", id = db.reqId, scene = scene,
+      tone = db.reqTone, count = tostring(db.reqCount),
+      personality = db.reqPersonality, quirks = db.reqQuirks,
+    })
+    SafeReloadLater(10, "post-send-suggestions")
   end
 end
 
@@ -1123,9 +1164,15 @@ function ns.RequestDraft()
     print("|cffffcc00RPHelper|r drafting character sheet (no reload)...")
     SafeReloadLater(5, "post-send-draft")
   else
-    LogEvent("SEND draft id=" .. db.reqId)
-    print("|cffffcc00RPHelper|r drafting character sheet - reloading...")
-    SafeReload("send-draft", true) -- click origin: try now, defer if in cooldown
+    LogEvent("SEND draft id=" .. db.reqId .. " error-channel")
+    panel.statusFs:SetText("Drafting sheet... no reload now - result in a few seconds.")
+    print("|cffffcc00RPHelper|r drafting character sheet (no reload)...")
+    EmitLater({
+      kind = "draft", id = db.reqId, scene = db.reqScene,
+      tone = db.reqTone, count = "1",
+      personality = db.reqPersonality, quirks = db.reqQuirks,
+    })
+    SafeReloadLater(10, "post-send-draft")
   end
 end
 
@@ -1313,6 +1360,16 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
       db.reloadMechanism = nil
     end
     ProbeSaveApi() -- SaveAddOnVariables => no-reload sends (io is unavailable)
+    -- Hide deliberate error-channel popups (the RPHelperREQ emits). Real
+    -- addon errors are still caught by our pcall wrappers + event log.
+    pcall(function()
+      if C_CVar and C_CVar.SetCVar then
+        C_CVar.SetCVar("scriptErrors", "0")
+      elseif SetCVar then
+        SetCVar("scriptErrors", "0")
+      end
+    end)
+    LogEvent("scriptErrors CVar set to 0 (hide error-channel popups)")
     -- CVar channel probe: set rphNonce NOW and every 30s DURING play. If a
     -- new value shows up in config-cache.wtf without a reload in between,
     -- CVars flush mid-play => sends can skip the reload entirely (v0.3.0).

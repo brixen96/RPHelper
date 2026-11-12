@@ -123,7 +123,14 @@ function luaString(s) {
     .replace(/\n/g, '\\n')}"`;
 }
 
-function buildHandoffFile({ suggestions, scene, tone, requestId, error, kind, personality, quirks, chatReply, globalName }) {
+function luaChatHistory(history) {
+  const items = history
+    .map((e) => `    { r = ${luaString(e.r || 'u')}, t = ${luaString(e.t || '')} },`)
+    .join('\n');
+  return `{\n${items}\n  }`;
+}
+
+function buildHandoffFile({ suggestions, scene, tone, requestId, error, kind, personality, quirks, chatReply, chatHistoryFull, globalName }) {
   const generatedAt = new Date().toISOString();
   const items = (suggestions || []).map((s) => `    ${luaString(s)},`).join('\n');
   // CRITICAL: the chat mailbox must assign ITS OWN global — writing
@@ -143,6 +150,7 @@ ${global} = {
   personality = ${personality !== undefined ? luaString(personality) : 'nil'},
   quirks = ${quirks !== undefined ? luaString(quirks) : 'nil'},
   chatReply = ${chatReply !== undefined ? luaString(chatReply) : 'nil'},
+  chatHistoryFull = ${chatHistoryFull && chatHistoryFull.length ? luaChatHistory(chatHistoryFull) : 'nil'},
   suggestions = {
 ${items}
   },
@@ -296,21 +304,32 @@ Rules:
 - Never write actions or dialogue for other players' characters.
 - If essential context is missing, ask one short clarifying question.`;
 
-async function generateChatReply(parsed) {
-  if (!config.openrouter?.apiKey) return null;
-  let history = [];
+// Server-side canonical chat history: survives reload-free sends (the
+// addon's SavedVariables copy only updates on /reload, so between reloads
+// the watcher owns the conversation and ships it back via chatHistoryFull).
+const CHAT_HISTORY_FILE = path.join(ROOT, 'chat-history.json');
+function loadChatHistory() {
   try {
-    history = JSON.parse(parsed.chatJson || '[]');
+    const h = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, 'utf8').replace(/^\uFEFF/, ''));
+    return Array.isArray(h) ? h : [];
   } catch {
-    history = [];
+    return [];
   }
-  if (!Array.isArray(history)) history = [];
-  const messages = history
+}
+function saveChatHistory(history) {
+  try {
+    fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify(history.slice(-40)), 'utf8');
+  } catch (err) {
+    logLine(`chat history save failed: ${err.message}`);
+  }
+}
+
+async function generateChatReply(history) {
+  if (!config.openrouter?.apiKey) return null;
+  const messages = (Array.isArray(history) ? history : [])
     .slice(-16)
     .map((e) => ({ role: e && e.r === 'a' ? 'assistant' : 'user', content: String((e && e.t) || '') }))
     .filter((m) => m.content);
-  const pending = String(parsed.chatPendingText || '').trim();
-  if (pending) messages.push({ role: 'user', content: pending });
   if (messages.length === 0 || messages[messages.length - 1].role !== 'user') {
     throw new Error('empty chat message');
   }
@@ -470,6 +489,19 @@ function saveState(obj) {
 const _state = loadState();
 let lastMainId = _state.lastMainId ?? _state.lastProcessedId ?? null; // migrate old key
 let lastChatId = _state.lastChatId ?? null;
+let errLogOffset = _state.errLogOffset ?? null; // General.log tail position (null = start at end)
+// Processed-id set: single last-id dedupe broke when the error channel
+// processed a NEW id — the stale (already-answered) SV id then looked
+// "unprocessed" and re-fired, wasting an AI call.
+let processedIds = new Set((_state.processedIds || []).map(String));
+if (lastChatId) processedIds.add(String(lastChatId));
+if (lastMainId) processedIds.add(String(lastMainId));
+function markProcessed(id) {
+  processedIds.add(String(id));
+  while (processedIds.size > 60) {
+    processedIds.delete(processedIds.values().next().value);
+  }
+}
 let processing = false;
 let processingSince = 0;
 let stallLogged = false;
@@ -482,6 +514,7 @@ async function runRequest({ lane, reqId, parsed }) {
   stallLogged = false;
   if (lane === 'chat') lastChatId = reqId;
   else lastMainId = reqId;
+  markProcessed(reqId);
   try {
     const payload = {
       character: {
@@ -506,11 +539,32 @@ async function runRequest({ lane, reqId, parsed }) {
     let suggestions = null;
     let draft = null;
     let chatReply = null;
+    let chatHistoryFull = null;
     let error = null;
     if (config.openrouter?.apiKey) {
       try {
         if (isChat) {
-          chatReply = await generateChatReply(parsed);
+          // Server-side history (survives reload-free sends); fall back to
+          // the addon's SavedVariables copy for the very first conversation.
+          let history = loadChatHistory();
+          if (history.length === 0) {
+            try {
+              history = JSON.parse(parsed.chatJson || '[]');
+            } catch {
+              history = [];
+            }
+            if (!Array.isArray(history)) history = [];
+          }
+          const pending = String(parsed.chatPendingText || '').trim();
+          if (pending && (history.length === 0 || history[history.length - 1].t !== pending)) {
+            history.push({ r: 'u', t: pending });
+          }
+          chatReply = await generateChatReply(history);
+          if (chatReply) {
+            history.push({ r: 'a', t: chatReply });
+            saveChatHistory(history);
+          }
+          chatHistoryFull = history;
         } else if (isDraft) {
           draft = await generateDraftWithAI(payload);
         } else {
@@ -549,6 +603,7 @@ async function runRequest({ lane, reqId, parsed }) {
         personality: draft ? draft.personality : undefined,
         quirks: draft ? draft.quirks : undefined,
         chatReply,
+        chatHistoryFull,
         globalName: isChat ? 'RPHelperChatHandoffData' : 'RPHelperHandoffData',
       }),
       'utf8'
@@ -567,7 +622,7 @@ async function runRequest({ lane, reqId, parsed }) {
     logLine(`ERROR ${err.stack || err.message}`);
     stats.lastError = err.message;
   } finally {
-    saveState({ lastMainId, lastChatId });
+    saveState({ lastMainId, lastChatId, errLogOffset, processedIds: [...processedIds] });
     processing = false;
   }
 }
@@ -584,6 +639,19 @@ async function poll() {
     }
     return;
   }
+
+  // Error-channel requests first (fresh user actions, arrived without any
+  // reload — the whole point of v0.3.0).
+  if (pendingErrReqs.length) {
+    const obj = pendingErrReqs.shift();
+    const isChat = obj.kind === 'chat';
+    const id = String(obj.id);
+    if (!processedIds.has(id)) {
+      await runRequest({ lane: isChat ? 'chat' : 'main', reqId: id, parsed: buildParsedFromError(obj) });
+    }
+    return;
+  }
+
   const wowRoot = deriveWowRoot(config);
   if (!wowRoot) return;
   const sv = findSavedVariablesFile(wowRoot);
@@ -602,14 +670,14 @@ async function poll() {
   if (!chatId && parsed.reqKind === 'chat' && parsed.reqStatus === 'pending' && parsed.reqId) {
     chatId = String(parsed.reqId); // legacy fallback (pre-0.2.4 addon)
   }
-  if (chatId && chatId !== lastChatId) {
+  if (chatId && !processedIds.has(chatId)) {
     await runRequest({ lane: 'chat', reqId: chatId, parsed });
     return;
   }
 
   // Main lane (suggestions / sheet draft)
   const reqId = parsed.reqId ? String(parsed.reqId) : null;
-  if (reqId && reqId !== lastMainId && parsed.reqStatus === 'pending' && parsed.reqKind !== 'chat') {
+  if (reqId && !processedIds.has(reqId) && parsed.reqStatus === 'pending' && parsed.reqKind !== 'chat') {
     await runRequest({ lane: 'main', reqId, parsed });
   }
 }
@@ -621,6 +689,88 @@ async function poll() {
 // ---------------------------------------------------------------------------
 let lastExportedLog = '';
 let lastExportErr = null;
+
+// ---------------------------------------------------------------------------
+// Error-channel requests (v0.3.0): the addon raises a deliberate Lua error
+// carrying the request payload — General.log receives errors in REAL-TIME
+// (verified: error storms logged with per-second timestamps during play),
+// so sends need NO reload. SavedVariables remain the fallback path.
+// ---------------------------------------------------------------------------
+const pendingErrReqs = [];
+
+function tailGeneralLog() {
+  const wowRoot = deriveWowRoot(config);
+  if (!wowRoot) return;
+  const logPath = path.join(wowRoot, 'Logs', 'General.log');
+  let size;
+  try {
+    size = fs.statSync(logPath).size;
+  } catch {
+    return;
+  }
+  if (errLogOffset === null) {
+    errLogOffset = size; // first run: start at the end (ignore history)
+    return;
+  }
+  if (size < errLogOffset) errLogOffset = 0; // truncated/rotated
+  if (size === errLogOffset) return;
+  let text;
+  try {
+    const fd = fs.openSync(logPath, 'r');
+    const len = size - errLogOffset;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, errLogOffset);
+    fs.closeSync(fd);
+    text = buf.toString('utf8');
+    errLogOffset = size;
+  } catch {
+    return;
+  }
+  const re = /RPHelperREQ:(\{[^\r\n]*\})/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let obj;
+    try {
+      obj = JSON.parse(m[1]);
+    } catch (err) {
+      logLine(`REQ payload unparseable: ${err.message}`);
+      continue;
+    }
+    const id = obj.id ? String(obj.id) : null;
+    if (!id) continue;
+    if (processedIds.has(id)) continue;
+    if (pendingErrReqs.some((p) => String(p.id) === id)) continue;
+    pendingErrReqs.push(obj);
+    logLine(`REQ via error channel: kind=${obj.kind} id=${id} (no reload needed)`);
+  }
+  saveState({ lastMainId, lastChatId, errLogOffset, processedIds: [...processedIds] });
+}
+
+/** Merge an error-channel payload with the last on-disk SavedVariables
+ * (character info etc. is stable; payload fields override the stale ones). */
+function buildParsedFromError(obj) {
+  let disk = {};
+  try {
+    const wowRoot = deriveWowRoot(config);
+    const sv = wowRoot ? findSavedVariablesFile(wowRoot) : null;
+    if (sv) disk = parseSavedVariables(fs.readFileSync(sv, 'utf8'));
+  } catch {
+    /* stale disk is fine */
+  }
+  return {
+    ...disk,
+    reqKind: obj.kind,
+    reqId: obj.id,
+    reqStatus: 'pending',
+    chatPendingId: obj.kind === 'chat' ? obj.id : undefined,
+    chatPendingText: obj.kind === 'chat' ? String(obj.text || '') : undefined,
+    reqScene: obj.scene ?? disk.reqScene,
+    reqTone: obj.tone ?? disk.reqTone,
+    reqCount: obj.count ?? disk.reqCount,
+    reqPersonality: obj.personality ?? disk.reqPersonality,
+    reqQuirks: obj.quirks ?? disk.reqQuirks,
+  };
+}
 
 // CVar flush probe: the addon sets `rphNonce` via SetCVar at every load.
 // Each NEW nonce value appearing in config-cache.wtf = a CVar flush event.
@@ -766,6 +916,7 @@ async function pollLoop() {
   try {
     exportAddonLog();
     checkCVarFlush();
+    tailGeneralLog();
     await poll();
   } catch (e) {
     logLine(`poll error: ${e.stack || e.message}`);
