@@ -50,6 +50,7 @@ function loadConfig() {
 }
 const config = loadConfig();
 const PORT = config.port || 7331;
+let chatBusy = false; // one browser chat request at a time
 
 // Crash guards: a silent death means no AI replies in game and no clue why.
 // Log loudly (and to a file) instead of exiting.
@@ -424,9 +425,109 @@ function serveStatic(req, res) {
   });
 }
 
+/** Browser chat: instant, no reload — the canonical conversation lives in
+ * chat-history.json (shared with the addon's legacy chat lane). */
+async function handleChatPost(req, res) {
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', async () => {
+    if (chatBusy) return sendJson(res, 429, { ok: false, error: 'still thinking about the last message…' });
+    chatBusy = true;
+    try {
+      let text = '';
+      try {
+        text = String(JSON.parse(body || '{}').text || '').trim();
+      } catch {
+        return sendJson(res, 400, { ok: false, error: 'bad JSON' });
+      }
+      if (!text) return sendJson(res, 400, { ok: false, error: 'empty message' });
+      if (!config.openrouter?.apiKey) {
+        return sendJson(res, 503, { ok: false, error: 'No API key — add one to config.json and restart the watcher.' });
+      }
+      const history = loadChatHistory();
+      history.push({ r: 'u', t: text });
+      let reply = null;
+      let error = null;
+      try {
+        reply = await generateChatReply(history);
+      } catch (err) {
+        error = err.message;
+      }
+      if (!reply) {
+        history.pop(); // don't keep a message we couldn't answer
+        logLine(`browser chat FAILED: ${error || 'empty reply'}`);
+        return sendJson(res, 502, { ok: false, error: error || 'AI returned an empty reply' });
+      }
+      history.push({ r: 'a', t: reply });
+      saveChatHistory(history);
+      stats.lastRequestAt = new Date().toISOString();
+      logLine(`browser chat (${text.length} chars) -> reply (${reply.length} chars)`);
+      return sendJson(res, 200, { ok: true, reply, history });
+    } catch (err) {
+      logLine(`chat endpoint error: ${err.stack || err.message}`);
+      return sendJson(res, 500, { ok: false, error: err.message });
+    } finally {
+      chatBusy = false;
+    }
+  });
+}
+
+/** Everything the frontend needs in one poll: status, character, latest
+ * in-game suggestions, and the chat history. */
+function handleState(res) {
+  const wowRoot = deriveWowRoot(config);
+  const sv = wowRoot ? findSavedVariablesFile(wowRoot) : null;
+  let svData = {};
+  try {
+    if (sv) svData = parseSavedVariables(fs.readFileSync(sv, 'utf8'));
+  } catch { /* stale/missing is fine */ }
+  let h = {};
+  try {
+    h = parseSavedVariables(fs.readFileSync(resolveHandoffTarget().file, 'utf8'));
+  } catch { /* no handoff yet */ }
+  const target = resolveHandoffTarget();
+  return sendJson(res, 200, {
+    ok: true,
+    status: {
+      model: config.openrouter?.model || null,
+      hasApiKey: Boolean(config.openrouter?.apiKey),
+      uptimeSec: Math.round(process.uptime()),
+      requestsServed: stats.requestsServed,
+      lastRequestAt: stats.lastRequestAt,
+      lastError: stats.lastError,
+      svPath: sv,
+      handoffPath: target.file,
+    },
+    character: {
+      name: svData.name || null,
+      realm: svData.realm || null,
+      race: svData.race || null,
+      class: svData.class || null,
+      level: svData.level || null,
+      spec: svData.spec || null,
+    },
+    scene: svData.sceneDraft || '',
+    personality: svData.personality || '',
+    quirks: svData.quirks || '',
+    tone: svData.tone || 'Neutral',
+    count: svData.count || 3,
+    suggestions: Array.isArray(h.suggestions) ? h.suggestions : [],
+    suggestionsAt: h.generatedAt || null,
+    suggestionsTone: h.tone || null,
+    suggestionsScene: h.scene || null,
+    chat: loadChatHistory(),
+  });
+}
+
 const server = http.createServer((req, res) => {
   try {
     const { pathname } = new URL(req.url, 'http://x');
+    if (pathname === '/api/chat' && req.method === 'POST') {
+      return handleChatPost(req, res);
+    }
+    if (pathname === '/api/state' && req.method === 'GET') {
+      return handleState(res);
+    }
     if (pathname === '/api/log') {
       return sendJson(res, 200, {
         ok: true,

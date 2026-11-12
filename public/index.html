@@ -2,51 +2,332 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>RPHelper — status</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RPHelper — AI RP Companion</title>
   <style>
+    :root {
+      --gold: #c8a24a;
+      --gold-dim: #8a7440;
+      --bg: #14100c;
+      --panel: #1e1811;
+      --panel-edge: #3a2f1c;
+      --text: #d8cfc0;
+      --text-dim: #8a8070;
+      --user: #7fd17f;
+      --ai: #e0c060;
+      --danger: #d05050;
+    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #14100c;
-      color: #9a8f76;
+      background: var(--bg);
+      color: var(--text);
       font-family: "Segoe UI", system-ui, sans-serif;
-      font-size: 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
     }
-    .box { text-align: center; line-height: 1.8; }
-    h1 { color: #c8a24a; font-weight: normal; letter-spacing: 2px; margin: 0 0 8px; }
-    .ok { color: #6fbf73; }
-    .bad { color: #d05050; }
-    code { background: #2a231a; padding: 1px 6px; border-radius: 4px; color: #c8a24a; }
+    header {
+      width: 100%;
+      max-width: 900px;
+      padding: 18px 20px 10px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      color: var(--gold);
+      font-weight: normal;
+      letter-spacing: 3px;
+      font-size: 22px;
+    }
+    h1 small { color: var(--text-dim); letter-spacing: 1px; font-size: 12px; }
+    #status { font-size: 12px; color: var(--text-dim); }
+    #status .ok { color: #6fbf73; }
+    #status .bad { color: var(--danger); }
+
+    .layout {
+      width: 100%;
+      max-width: 900px;
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 14px;
+      padding: 0 20px 20px;
+      flex: 1;
+    }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--panel-edge);
+      border-radius: 6px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      font-weight: normal;
+      color: var(--gold);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    /* Chat */
+    #chatPanel { min-height: 480px; }
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      max-height: 60vh;
+      padding-right: 6px;
+      scroll-behavior: smooth;
+    }
+    .msg { margin-bottom: 12px; line-height: 1.45; }
+    .msg .who { font-size: 12px; letter-spacing: 1px; }
+    .msg.user .who { color: var(--user); }
+    .msg.ai .who { color: var(--ai); }
+    .msg .body { white-space: pre-wrap; word-break: break-word; }
+    .msg.user .body { color: #cfe8cf; }
+    .msg.ai .body { color: var(--text); }
+    .msg.pending .body { color: var(--text-dim); font-style: italic; }
+    .msg.error .body { color: var(--danger); }
+    .empty { color: var(--text-dim); font-style: italic; }
+
+    #composer { display: flex; gap: 8px; margin-top: 12px; }
+    #input {
+      flex: 1;
+      background: #0d0a07;
+      border: 1px solid var(--panel-edge);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      resize: none;
+      min-height: 44px;
+      max-height: 140px;
+    }
+    #input:focus { outline: none; border-color: var(--gold-dim); }
+    button {
+      background: linear-gradient(#5a2020, #3a1414);
+      border: 1px solid #7a3030;
+      color: #e8b060;
+      border-radius: 4px;
+      padding: 0 18px;
+      font-size: 14px;
+      cursor: pointer;
+      letter-spacing: 1px;
+    }
+    button:hover { filter: brightness(1.2); }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    /* Sidebar */
+    .card { margin-bottom: 14px; }
+    .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+    .kv .k { color: var(--text-dim); }
+    .kv .v { color: var(--text); text-align: right; }
+    #charName { color: var(--gold); font-size: 15px; margin-bottom: 6px; }
+
+    .suggestion {
+      background: #0d0a07;
+      border: 1px solid var(--panel-edge);
+      border-radius: 4px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      line-height: 1.4;
+      cursor: pointer;
+      position: relative;
+    }
+    .suggestion:hover { border-color: var(--gold-dim); }
+    .suggestion .num { color: var(--gold-dim); margin-right: 6px; }
+    .suggestion .copied {
+      position: absolute; right: 8px; top: 6px;
+      color: var(--user); font-size: 11px; opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .suggestion.copied .copied { opacity: 1; }
+    .dim { color: var(--text-dim); font-size: 12px; font-style: italic; }
+    footer { text-align: center; color: var(--text-dim); font-size: 11px; padding: 8px; }
+    footer code { background: #2a231a; padding: 1px 6px; border-radius: 4px; color: var(--gold); }
   </style>
 </head>
 <body>
-  <div class="box">
-    <h1>⚔️ RPHelper</h1>
-    <div id="line1">connecting…</div>
-    <div id="line2"></div>
-    <div id="line3"></div>
-    <p>The GUI lives in-game — type <code>/rph</code> in WoW.</p>
+  <header>
+    <h1>⚔️ RPHelper <small id="ver"></small></h1>
+    <div id="status">connecting…</div>
+  </header>
+
+  <div class="layout">
+    <section class="panel" id="chatPanel">
+      <h2>AI Chat — letters, replies, RP etiquette</h2>
+      <div id="messages"><div class="empty">Say hello, or ask for a letter draft…</div></div>
+      <div id="composer">
+        <textarea id="input" placeholder="Message the AI… (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+        <button id="send">Send</button>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel card">
+        <h2>Character</h2>
+        <div id="charName">—</div>
+        <div class="kv"><span class="k">Race / Class</span><span class="v" id="cRace">—</span></div>
+        <div class="kv"><span class="k">Level</span><span class="v" id="cLevel">—</span></div>
+        <div class="kv"><span class="k">Spec</span><span class="v" id="cSpec">—</span></div>
+        <div class="kv"><span class="k">Realm</span><span class="v" id="cRealm">—</span></div>
+      </section>
+
+      <section class="panel card">
+        <h2>In-game suggestions</h2>
+        <div id="suggestions"><div class="dim">Write suggestions in game (/rph) — they appear here.</div></div>
+        <div class="dim" id="sugMeta" style="margin-top:6px"></div>
+      </section>
+
+      <section class="panel card">
+        <h2>Watcher</h2>
+        <div class="kv"><span class="k">Model</span><span class="v" id="wModel">—</span></div>
+        <div class="kv"><span class="k">Requests</span><span class="v" id="wServed">—</span></div>
+        <div class="kv"><span class="k">Uptime</span><span class="v" id="wUptime">—</span></div>
+        <div class="kv"><span class="k">Game link</span><span class="v" id="wGame">—</span></div>
+      </section>
+    </aside>
   </div>
+
+  <footer>Open this page while playing · in-game panel: <code>/rph</code> · click a suggestion to copy it</footer>
+
   <script>
-    async function refresh() {
+    const $ = (id) => document.getElementById(id);
+    let busy = false;
+
+    function esc(s) {
+      return String(s).replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>');
+    }
+
+    function renderMessages(history) {
+      const box = $('messages');
+      if (!history || history.length === 0) {
+        box.innerHTML = '<div class="empty">Say hello, or ask for a letter draft…</div>';
+        return;
+      }
+      box.innerHTML = history.map((e) => {
+        const role = e.r === 'a' ? 'ai' : 'user';
+        const who = e.r === 'a' ? 'RPHelper' : 'You';
+        return `<div class="msg ${role}"><div class="who">${who}:</div><div class="body">${esc(e.t)}</div></div>`;
+      }).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function addOptimistic(text) {
+      const box = $('messages');
+      if (box.querySelector('.empty')) box.innerHTML = '';
+      box.insertAdjacentHTML('beforeend',
+        `<div class="msg user"><div class="who">You:</div><div class="body">${esc(text)}</div></div>` +
+        `<div class="msg ai pending" id="pendingMsg"><div class="who">RPHelper:</div><div class="body">thinking…</div></div>`);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function send() {
+      if (busy) return;
+      const text = $('input').value.trim();
+      if (!text) return;
+      busy = true;
+      $('send').disabled = true;
+      $('input').value = '';
+      addOptimistic(text);
       try {
-        const res = await fetch('/api/status');
-        const s = await res.json();
-        document.getElementById('line1').innerHTML =
-          `<span class="${s.ok ? 'ok' : 'bad'}">● watcher running</span> · ${s.model || '?'}`;
-        document.getElementById('line2').textContent =
-          `requests served: ${s.requestsServed}` + (s.lastRequestAt ? ` · last: ${s.lastRequestAt.slice(11, 19)} UTC` : '');
-        document.getElementById('line3').textContent =
-          s.svPath ? 'game link: connected' : 'game link: waiting for first /reload in game';
-      } catch {
-        document.getElementById('line1').innerHTML = '<span class="bad">● watcher not reachable</span>';
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          renderMessages(data.history);
+        } else {
+          const p = $('pendingMsg');
+          if (p) {
+            p.className = 'msg error';
+            p.querySelector('.body').textContent = '⚠ ' + (data.error || 'failed');
+          }
+        }
+      } catch (err) {
+        const p = $('pendingMsg');
+        if (p) {
+          p.className = 'msg error';
+          p.querySelector('.body').textContent = '⚠ watcher unreachable: ' + err.message;
+        }
+      } finally {
+        busy = false;
+        $('send').disabled = false;
+        $('input').focus();
       }
     }
-    refresh();
-    setInterval(refresh, 3000);
+
+    function renderSuggestions(list, meta) {
+      const box = $('suggestions');
+      if (!list || list.length === 0) {
+        box.innerHTML = '<div class="dim">Write suggestions in game (/rph) — they appear here.</div>';
+        $('sugMeta').textContent = '';
+        return;
+      }
+      box.innerHTML = list.map((s, i) =>
+        `<div class="suggestion" data-text="${esc(s).replace(/"/g, '"')}"><span class="num">${i + 1}.</span>${esc(s)}<span class="copied">copied ✓</span></div>`
+      ).join('');
+      $('sugMeta').textContent = meta || '';
+      box.querySelectorAll('.suggestion').forEach((el) => {
+        el.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(el.dataset.text);
+            el.classList.add('copied');
+            setTimeout(() => el.classList.remove('copied'), 1200);
+          } catch { /* clipboard denied */ }
+        });
+      });
+    }
+
+    async function pollState() {
+      try {
+        const res = await fetch('/api/state');
+        const s = await res.json();
+        if (!s.ok) return;
+        const st = s.status;
+        $('status').innerHTML =
+          `<span class="${st.hasApiKey ? 'ok' : 'bad'}">● watcher</span> · ${st.model || '?'} · ${st.requestsServed} served`;
+        const c = s.character;
+        if (c && c.name) {
+          $('charName').textContent = c.name + (c.realm ? ' — ' + c.realm : '');
+          $('cRace').textContent = [c.race, c.class].filter(Boolean).join(' ') || '—';
+          $('cLevel').textContent = c.level || '—';
+          $('cSpec').textContent = c.spec || '—';
+          $('cRealm').textContent = c.realm || '—';
+        }
+        $('wModel').textContent = st.model || '—';
+        $('wServed').textContent = st.requestsServed;
+        $('wUptime').textContent = Math.round(st.uptimeSec / 60) + 'm';
+        $('wGame').innerHTML = st.svPath
+          ? '<span class="ok">connected</span>'
+          : '<span class="bad">waiting for /reload</span>';
+        renderSuggestions(s.suggestions,
+          s.suggestionsAt ? 'from game · ' + String(s.suggestionsAt).slice(11, 19) + ' UTC · tone: ' + (s.suggestionsTone || '-') : '');
+        if (!busy) renderMessages(s.chat);
+      } catch {
+        $('status').innerHTML = '<span class="bad">● watcher not reachable</span>';
+      }
+    }
+
+    $('send').addEventListener('click', send);
+    $('input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    pollState();
+    setInterval(pollState, 3000);
+    $('input').focus();
   </script>
 </body>
 </html>

@@ -12,7 +12,7 @@ local ADDON_NAME, ns = ...
 
 -- Bump this on every release — shown in the panel title and on load so the
 -- player can confirm the installed version matches the repo.
-local VERSION = "0.3.1"
+local VERSION = "0.3.2"
 
 -- ---------------------------------------------------------------------------
 -- Client compat — this client (older private-server core) predates several
@@ -84,7 +84,6 @@ local MAX_CHAT_LINES = 12
 -- Shared request plumbing (declared early: chat + suggestion flows both use it)
 local WAIT_INTERVAL = 2
 local MAX_ATTEMPTS = 45    -- 90s auto-reload window for suggestions/draft
-local CHAT_MAX_ATTEMPTS = 60 -- 120s for chat replies
 
 local function RequestId()
   return tostring(time()) .. "-" .. tostring(math.random(1000, 9999))
@@ -522,7 +521,7 @@ local function CreatePanel()
   if panel then return panel end
 
   local f = CreateFrame("Frame", "RPHelperPanel", UIParent, "BackdropTemplate")
-  f:SetSize(460, 760)
+  f:SetSize(460, 560)
   f:SetPoint("CENTER", UIParent, "CENTER", 380, 0)
   f:SetMovable(true)
   f:EnableMouse(true)
@@ -702,64 +701,11 @@ local function CreatePanel()
   container:SetHeight(170)
   f.rowsContainer = container
 
-  -- AI chat section (merged into the main panel — only /rph needed)
-  local chatLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  chatLabel:SetPoint("TOPLEFT", container, "BOTTOMLEFT", 0, -10)
-  chatLabel:SetText("AI Chat - letters, replies, RP etiquette:")
-
-  local chatScroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  chatScroll:SetPoint("TOPLEFT", chatLabel, "BOTTOMLEFT", 0, -6)
-  chatScroll:SetPoint("BOTTOMRIGHT", -36, 116)
-  local chatHistoryBox = CreateFrame("EditBox", nil, chatScroll)
-  chatHistoryBox:SetSize(400, 400)
-  chatHistoryBox:SetMultiLine(true)
-  chatHistoryBox:SetAutoFocus(false)
-  chatHistoryBox:SetFontObject("GameFontHighlight")
-  chatHistoryBox:SetText("")
-  chatHistoryBox:Disable()
-  chatScroll:SetScrollChild(chatHistoryBox)
-  f.chatHistoryBox = chatHistoryBox
-  f.chatScroll = chatScroll
-
-  local chatInput = MakeInputBox(f, 400, 40, false, 600)
-  chatInput:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 46)
-  chatInput:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36, 46)
-  chatInput:SetScript("OnEnterPressed", function(self)
-    self:ClearFocus()
-    ns.SendChat()
-  end)
-  f.chatInput = chatInput
-
-  local chatInputLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  chatInputLabel:SetPoint("BOTTOMLEFT", chatInput, "TOPLEFT", 2, 4)
-  chatInputLabel:SetText("Message the AI (Enter to send):")
-
-  local sendBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  sendBtn:SetSize(90, 24)
-  sendBtn:SetPoint("BOTTOMRIGHT", -16, 14)
-  sendBtn:SetText("Send")
-  sendBtn:SetScript("OnClick", function()
-    local ok, err = pcall(ns.SendChat)
-    if not ok then
-      LogEvent("ERROR " .. tostring(err))
-      print("|cffffcc00RPHelper|r error: " .. tostring(err))
-    end
-  end)
-  f.sendBtn = sendBtn
-
-  local clearBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-  clearBtn:SetSize(90, 24)
-  clearBtn:SetPoint("RIGHT", sendBtn, "LEFT", -8, 0)
-  clearBtn:SetText("Clear")
-  clearBtn:SetScript("OnClick", function()
-    db.chatHistory = {}
-    ns.RefreshChat()
-  end)
-  f.clearBtn = clearBtn
-
+  -- Chat lives in the BROWSER now (http://127.0.0.1:7331) — instant, no
+  -- reloads. In-game keeps: scene, sheet, suggestions, Check, Copy log.
   local copyBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
   copyBtn:SetSize(80, 24)
-  copyBtn:SetPoint("RIGHT", clearBtn, "LEFT", -8, 0)
+  copyBtn:SetPoint("BOTTOMRIGHT", -16, 14)
   copyBtn:SetText("Copy log")
   copyBtn:SetScript("OnClick", function() ns.ExportLog() end)
   f.copyBtn = copyBtn
@@ -776,10 +722,10 @@ local function CreatePanel()
   end)
   f.checkBtn = checkBtn
 
-  -- Footer hint (short — sits left of the Send/Clear buttons)
+  -- Footer hint (short — sits left of the Check/Copy log buttons)
   local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   hint:SetPoint("BOTTOMLEFT", 16, 20)
-  hint:SetText("/rph help")
+  hint:SetText("AI chat: 127.0.0.1:7331 · /rph help")
 
   -- Persist the sheet whenever the panel closes (SavedVariables save on reload/logout)
   f:SetScript("OnHide", function(self)
@@ -794,150 +740,8 @@ local function CreatePanel()
   return f
 end
 
--- ---------------------------------------------------------------------------
--- AI chat panel (multi-turn discussion: letters, replies, RP etiquette)
--- History lives in SavedVariables as a JSON string; the watcher reads it,
--- calls the AI, and writes the reply back — same reload handshake.
--- ---------------------------------------------------------------------------
-local function ChatHistory()
-  if not db then return {} end
-  if type(db.chatHistory) ~= "table" then db.chatHistory = {} end
-  return db.chatHistory
-end
-
-local function ChatPending()
-  if not db then return "" end
-  if type(db.chatPending) ~= "table" then db.chatPending = {} end
-  return db.chatPending
-end
-
-local function ChatJson()
-  local parts = {}
-  for _, e in ipairs(ChatHistory()) do
-    local role = e.r == "a" and "a" or "u"
-    local text = tostring(e.t or ""):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n")
-    parts[#parts + 1] = ('{"r":"%s","t":"%s"}'):format(role, text)
-  end
-  return "[" .. table.concat(parts, ",") .. "]"
-end
-
-local function ChatAppend(role, text)
-  local h = ChatHistory()
-  h[#h + 1] = { r = role, t = text }
-  while #h > 40 do table.remove(h, 1) end
-end
-
-function ns.RefreshChat()
-  if not panel then CreatePanel() end
-  local lines = {}
-  for _, e in ipairs(ChatHistory()) do
-    if e.r == "a" then
-      lines[#lines + 1] = "|cffffcc00RPHelper:|r " .. tostring(e.t or "")
-    else
-      lines[#lines + 1] = "|cff1eff00You:|r " .. tostring(e.t or "")
-    end
-  end
-  if #lines == 0 then
-    lines[1] = "|cff9d9d9dNo conversation yet. Ask about a letter, a reply, or RP etiquette.|r"
-  end
-  panel.chatHistoryBox:SetText(table.concat(lines, "\n\n"))
-  -- Newest message visible from the start: multiline EditBoxes auto-grow to
-  -- content height inside a ScrollFrame, so range = content - viewport.
-  local range = panel.chatHistoryBox:GetHeight() - panel.chatScroll:GetHeight()
-  if range > 0 then
-    panel.chatScroll:SetVerticalScroll(range)
-  end
-  panel:Show()
-end
-
-function ns.SendChat()
-  if not db then return end
-  if not panel then CreatePanel() end
-  local text = strtrim(panel.chatInput:GetText() or "")
-  if text == "" then return end
-  ChatAppend("u", text)
-  local reqId = RequestId()
-  db.chatPending = { id = reqId, text = text, attempts = 0 }
-  db.chatJson = ChatJson()
-  -- Flat id field: the watcher's chat lane keys on this, so a newer
-  -- suggestions/draft send (which overwrites reqId) can't cancel it.
-  db.chatPendingId = reqId
-  db.chatPendingText = text
-  db.reqId = reqId
-  db.reqStatus = "pending"
-  db.reqKind = "chat"
-  db.reqAttempts = 0
-  db.lastError = nil
-  panel.chatInput:SetText("")
-  ns.RefreshChat()
-  if TrySaveNow() then
-    LogEvent(("SEND chat id=%s len=%d saved-no-reload"):format(reqId, #text))
-    panel.statusFs:SetText("Sending... reply arrives in a few seconds (one reload, not now).")
-    print("|cffffcc00RPHelper|r sending chat message (no reload)...")
-    SafeReloadLater(5, "post-send-chat")
-  else
-    -- Error channel: request reaches the watcher in real-time, NO instant
-    -- reload. The +10s reload persists SavedVariables (fallback) and picks
-    -- up the reply (handoff files are only readable at load time).
-    LogEvent(("SEND chat id=%s len=%d error-channel"):format(reqId, #text))
-    panel.statusFs:SetText("Sending... if no reply in ~15s, click Check.")
-    print("|cffffcc00RPHelper|r sending chat message (no reload)...")
-    EmitLater({ kind = "chat", id = reqId, text = text })
-    SafeReloadLater(10, "post-send-chat")
-  end
-end
-
--- Called on load: if the companion answered the pending chat message,
--- append it and reload once more to display (same bounded wait as requests).
-local function CheckChatReply()
-  local handoff = GetChatHandoff()
-  local pending = ChatPending()
-  if not (pending and pending.id) then return false end
-  if handoff and handoff.kind == "chat" and handoff.requestId and tostring(handoff.requestId) == tostring(pending.id) then
-    LogEvent("REPLY chat matched id=" .. tostring(pending.id))
-    db.chatPending = nil
-    db.chatPendingId = nil
-    db.chatPendingText = nil
-    db.reqStatus = "done"
-    if handoff.error then
-      ChatAppend("a", "[error] " .. tostring(handoff.error))
-      print("|cffffcc00RPHelper|r chat AI error: " .. tostring(handoff.error))
-    else
-      -- Server-side history is canonical (survives reload-free sends):
-      -- adopt it wholesale instead of appending a possibly-duplicate reply.
-      if type(handoff.chatHistoryFull) == "table" and #handoff.chatHistoryFull > 0 then
-        db.chatHistory = handoff.chatHistoryFull
-      else
-        ChatAppend("a", tostring(handoff.chatReply or "(empty reply)"))
-      end
-      print("|cffffcc00RPHelper|r chat reply received!")
-    end
-    -- Show it NOW — no reload needed to display (history + pending clear
-    -- persist together atomically on the next reload/logout).
-    ns.Refresh()
-    return true
-  end
-  -- Not answered yet: bounded wait-reload loop
-  ns.RefreshChat()
-  local attempts = pending.attempts or 0
-  if attempts >= CHAT_MAX_ATTEMPTS then
-    -- Auto-reload window exhausted: KEEP the pending request (a late reply
-    -- still displays on the next load) but stop the reload storm.
-    if not pending.gaveUp then
-      pending.gaveUp = true
-      LogEvent("WAIT chat gave up - kept pending for late display")
-      print("|cffffcc00RPHelper|r still waiting on the watcher - see RPHelperLog.txt. The reply will appear on the next reload.")
-    end
-    return true
-  end
-  attempts = attempts + 1
-  pending.attempts = attempts
-  LogEvent(("WAIT chat attempt=%d handoffKind=%s handoffId=%s"):format(
-    attempts, tostring(handoff and handoff.kind), tostring(handoff and handoff.requestId)))
-  panel.statusFs:SetText(("Waiting for AI reply... (attempt %d/%d)"):format(attempts, CHAT_MAX_ATTEMPTS))
-  SafeReload("wait-chat") -- cooldown-aware: defers out of the load window
-  return false
-end
+-- (Chat moved to the browser: http://127.0.0.1:7331 — instant, no reloads.
+-- The addon keeps only scene/sheet/suggestions, which must stay in-game.)
 
 -- ---------------------------------------------------------------------------
 -- Player info capture (used by the companion app as fallback)
@@ -1225,7 +1029,6 @@ end
 function ns.Refresh()
   if not panel then CreatePanel() end
   UpdateCharInfo()
-  ns.RefreshChat() -- keep the merged chat section in sync too
   local handoff = GetHandoff()
   if handoff and handoff.error then
     panel.statusFs:SetText(("AI error: %s — try again or check the companion app."):format(handoff.error))
@@ -1278,8 +1081,8 @@ local function HandleSlash(msg)
   elseif cmd == "check" then
     if panel and panel.statusFs then panel.statusFs:SetText("Checking for a reply...") end
     SafeReload("check-slash", true)
-  elseif cmd == "chat" then
-    ns.RefreshChat()
+  elseif cmd == "chat" or cmd == "web" then
+    print("|cffffcc00RPHelper|r AI chat lives in the browser now: |cffffcc00http://127.0.0.1:7331|r")
   elseif cmd == "version" or cmd == "v" then
     print(("|cffffcc00RPHelper|r version %s"):format(VERSION))
   elseif cmd == "log" or cmd == "export" then
@@ -1377,14 +1180,14 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
       end
       AfterDelay(30, tick)
     end
-    if not CheckChatReply() and not CheckHandoff() then
+    if not CheckHandoff() then
       -- Show the panel automatically when there are suggestions to pick from.
       local handoff = GetHandoff()
       if handoff and handoff.suggestions and #handoff.suggestions > 0 then
         ns.Refresh()
       end
     end
-    print(("|cffffcc00RPHelper|r v%s loaded — type |cffffcc00/rph|r for the panel, |cffffcc00/rph chat|r to talk to the AI."):format(VERSION))
+    print(("|cffffcc00RPHelper|r v%s loaded — |cffffcc00/rph|r panel · AI chat in browser: |cffffcc00http://127.0.0.1:7331|r"):format(VERSION))
   elseif event == "PLAYER_LOGIN" or event == "PLAYER_LEVEL_UP" then
     CapturePlayerInfo()
   elseif event == "PLAYER_ENTERING_WORLD" then
